@@ -13,9 +13,82 @@ std::string Solver::case_output_dir() const {
   return (fs::path(cfg_.output_dir) / cfg_.name).string();
 }
 
+std::string Solver::case_log_path() const {
+  namespace fs = std::filesystem;
+  return (fs::path(case_output_dir()) / "run.log").string();
+}
+
 std::string Solver::pressure_solver_dir() const {
   namespace fs = std::filesystem;
   return (fs::path(case_output_dir()) / "pressure_solver").string();
+}
+
+void Solver::open_case_log() {
+  namespace fs = std::filesystem;
+  const fs::path output_path = case_output_dir();
+  fs::create_directories(output_path);
+  case_log_.open(case_log_path(), std::ios::out | std::ios::trunc);
+  if (!case_log_) {
+    throw std::runtime_error("cannot open run.log");
+  }
+}
+
+void Solver::close_case_log() {
+  if (case_log_.is_open()) {
+    case_log_.flush();
+    case_log_.close();
+  }
+}
+
+void Solver::log_message(const std::string &message) {
+  if (!case_log_.is_open()) {
+    return;
+  }
+  case_log_ << message << "\n";
+  case_log_.flush();
+}
+
+void Solver::log_run_header() {
+  std::ostringstream out;
+  out << std::setprecision(17);
+  out << "CASE name=" << cfg_.name << " mode=" << cfg_.mode
+      << " nx=" << cfg_.nx << " ny=" << cfg_.ny
+      << " lx=" << cfg_.lx << " ly=" << cfg_.ly
+      << " dt=" << cfg_.dt << " steps=" << cfg_.steps
+      << " final_time=" << (cfg_.steps * cfg_.dt);
+  log_message(out.str());
+
+  out.str("");
+  out.clear();
+  out << "SOLVERS ch=SparsePCG pressure=" << cfg_.pressure_scheme
+      << " momentum=ExplicitConvection+MonolithicImplicitViscosityBiCGSTAB"
+      << " momentum_advection=" << cfg_.momentum_advection_scheme;
+  log_message(out.str());
+
+  out.str("");
+  out.clear();
+  out << std::setprecision(17)
+      << "LIMITS ch_max_it=" << cfg_.ch_inner_iterations
+      << " ch_tol=" << cfg_.ch_tolerance
+      << " pressure_max_it=" << cfg_.poisson_iterations
+      << " pressure_tol=" << cfg_.pressure_tolerance
+      << " momentum_max_it=" << cfg_.momentum_iterations
+      << " momentum_abs_tol=" << cfg_.momentum_tolerance
+      << " coupling_max_it=" << cfg_.coupling_iterations
+      << " coupling_tol=" << cfg_.coupling_tolerance;
+  log_message(out.str());
+
+  out.str("");
+  out.clear();
+  out << std::setprecision(17)
+      << "PHYSICS re=" << cfg_.re << " ca=" << cfg_.ca << " pe=" << cfg_.pe << " cn=" << cfg_.cn
+      << " density_ratio=" << cfg_.density_ratio
+      << " viscosity_ratio=" << cfg_.viscosity_ratio
+      << " periodic_x=" << cfg_.periodic_x
+      << " periodic_y=" << cfg_.periodic_y
+      << " top_wall_velocity_x=" << cfg_.top_wall_velocity_x
+      << " bottom_wall_velocity_x=" << cfg_.bottom_wall_velocity_x;
+  log_message(out.str());
 }
 
 void Solver::write_visualization(int step) const {
@@ -116,8 +189,8 @@ void Solver::write_summary_csv() const {
   out << "name,nx,ny,dt,steps,final_time,mass,mass_drift,divergence_l2,max_divergence,max_abs_mu,max_velocity,"
          "kinetic_energy,total_free_energy,ch_inner_residual,ch_equation_residual,coupling_residual,"
          "pressure_correction_residual,momentum_residual,boundary_speed_pre_correction,"
-         "boundary_speed_post_correction,rho_min,rho_max,eta_min,eta_max,coupling_iterations,"
-         "pressure_iterations,momentum_iterations\n";
+         "boundary_speed_post_correction,rho_min,rho_max,eta_min,eta_max,ch_iterations,coupling_iterations,"
+         "pressure_iterations,momentum_iterations,ch_solver_name,momentum_solver_name,pressure_solver_name\n";
   out << std::setprecision(17) << cfg_.name << "," << cfg_.nx << "," << cfg_.ny << "," << cfg_.dt << ","
       << cfg_.steps << "," << cfg_.steps * cfg_.dt << "," << last_diag_.mass << "," << last_diag_.mass_drift << ","
       << last_diag_.divergence_l2 << "," << last_diag_.max_divergence_after_correction << ","
@@ -127,8 +200,11 @@ void Solver::write_summary_csv() const {
       << last_diag_.pressure_correction_residual << "," << last_diag_.momentum_residual << ","
       << last_diag_.boundary_speed_pre_correction << "," << last_diag_.boundary_speed_post_correction << ","
       << last_diag_.rho_min << "," << last_diag_.rho_max << "," << last_diag_.eta_min << "," << last_diag_.eta_max
+      << "," << last_diag_.ch_iterations
       << "," << last_diag_.coupling_iterations << "," << last_diag_.pressure_iterations << ","
-      << last_diag_.momentum_iterations << "\n";
+      << last_diag_.momentum_iterations << ","
+      << last_diag_.ch_solver_name << "," << last_diag_.momentum_solver_name << ","
+      << last_diag_.pressure_solver_name << "\n";
 }
 
 void Solver::write_history_csv() const {
@@ -142,7 +218,8 @@ void Solver::write_history_csv() const {
   out << "step,time,mass,mass_drift,divergence_l2,max_divergence,max_abs_mu,max_velocity,kinetic_energy,"
          "total_free_energy,ch_inner_residual,ch_equation_residual,coupling_residual,pressure_correction_residual,"
          "momentum_residual,boundary_speed_pre_correction,boundary_speed_post_correction,rho_min,rho_max,eta_min,"
-         "eta_max,coupling_iterations,pressure_iterations,momentum_iterations\n";
+         "eta_max,ch_iterations,coupling_iterations,pressure_iterations,momentum_iterations,"
+         "ch_solver_name,momentum_solver_name,pressure_solver_name\n";
   out << std::setprecision(17);
   for (const HistoryEntry &entry : history_) {
     const Diagnostics &diag = entry.diag;
@@ -152,8 +229,9 @@ void Solver::write_history_csv() const {
         << diag.ch_equation_residual << "," << diag.coupling_residual << "," << diag.pressure_correction_residual
         << "," << diag.momentum_residual << "," << diag.boundary_speed_pre_correction << ","
         << diag.boundary_speed_post_correction << "," << diag.rho_min << "," << diag.rho_max << "," << diag.eta_min
-        << "," << diag.eta_max << "," << diag.coupling_iterations << "," << diag.pressure_iterations << ","
-        << diag.momentum_iterations << "\n";
+        << "," << diag.eta_max << "," << diag.ch_iterations << "," << diag.coupling_iterations << ","
+        << diag.pressure_iterations << "," << diag.momentum_iterations << ","
+        << diag.ch_solver_name << "," << diag.momentum_solver_name << "," << diag.pressure_solver_name << "\n";
   }
 }
 

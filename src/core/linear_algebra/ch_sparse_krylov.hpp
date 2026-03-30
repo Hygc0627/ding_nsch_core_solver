@@ -24,6 +24,7 @@ struct LowerTransposeEntry {
 enum class PreconditionerType {
   diagonal,
   incomplete_ldlt,
+  incomplete_cholesky,
 };
 
 struct KrylovPreconditioner {
@@ -284,6 +285,90 @@ inline bool try_build_incomplete_ldlt(const SparseMatrixCSR &matrix, KrylovPreco
   return true;
 }
 
+inline bool try_build_incomplete_cholesky(const SparseMatrixCSR &matrix, KrylovPreconditioner &preconditioner) {
+  preconditioner.type = PreconditionerType::incomplete_cholesky;
+  preconditioner.lower.assign(matrix.values.size(), 0.0);
+  preconditioner.diag.assign(static_cast<std::size_t>(matrix.n), 0.0);
+  preconditioner.lower_transpose.assign(static_cast<std::size_t>(matrix.n), {});
+
+  double max_diag = 0.0;
+  for (int row = 0; row < matrix.n; ++row) {
+    max_diag = std::max(max_diag, std::abs(matrix.values[static_cast<std::size_t>(
+                                                matrix.diag_pos[static_cast<std::size_t>(row)])]));
+  }
+  preconditioner.diagonal_floor = std::sqrt(std::max(1.0, max_diag) * 1.0e-12);
+
+  auto find_lower_entry = [&](int row, int target_col) {
+    for (int pos = matrix.row_ptr[static_cast<std::size_t>(row)];
+         pos < matrix.row_ptr[static_cast<std::size_t>(row + 1)]; ++pos) {
+      const int col = matrix.col_idx[static_cast<std::size_t>(pos)];
+      if (col >= row || col > target_col) {
+        break;
+      }
+      if (col == target_col) {
+        return preconditioner.lower[static_cast<std::size_t>(pos)];
+      }
+    }
+    return 0.0;
+  };
+
+  const double diagonal_floor_sq = square(preconditioner.diagonal_floor);
+  for (int row = 0; row < matrix.n; ++row) {
+    for (int pos = matrix.row_ptr[static_cast<std::size_t>(row)];
+         pos < matrix.row_ptr[static_cast<std::size_t>(row + 1)]; ++pos) {
+      const int col = matrix.col_idx[static_cast<std::size_t>(pos)];
+      if (col >= row) {
+        break;
+      }
+
+      double sum = matrix.values[static_cast<std::size_t>(pos)];
+      for (int prev = matrix.row_ptr[static_cast<std::size_t>(row)]; prev < pos; ++prev) {
+        const int k = matrix.col_idx[static_cast<std::size_t>(prev)];
+        if (k >= col) {
+          break;
+        }
+        const double l_jk = find_lower_entry(col, k);
+        if (l_jk != 0.0) {
+          sum -= preconditioner.lower[static_cast<std::size_t>(prev)] * l_jk;
+        }
+      }
+
+      const double denom =
+          std::max(preconditioner.diag[static_cast<std::size_t>(col)], preconditioner.diagonal_floor);
+      preconditioner.lower[static_cast<std::size_t>(pos)] = sum / denom;
+    }
+
+    double d = matrix.values[static_cast<std::size_t>(matrix.diag_pos[static_cast<std::size_t>(row)])];
+    for (int pos = matrix.row_ptr[static_cast<std::size_t>(row)];
+         pos < matrix.row_ptr[static_cast<std::size_t>(row + 1)]; ++pos) {
+      const int col = matrix.col_idx[static_cast<std::size_t>(pos)];
+      if (col >= row) {
+        break;
+      }
+      d -= square(preconditioner.lower[static_cast<std::size_t>(pos)]);
+    }
+
+    if (!std::isfinite(d) || d <= diagonal_floor_sq) {
+      return false;
+    }
+    preconditioner.diag[static_cast<std::size_t>(row)] = std::sqrt(d);
+  }
+
+  for (int row = 0; row < matrix.n; ++row) {
+    for (int pos = matrix.row_ptr[static_cast<std::size_t>(row)];
+         pos < matrix.row_ptr[static_cast<std::size_t>(row + 1)]; ++pos) {
+      const int col = matrix.col_idx[static_cast<std::size_t>(pos)];
+      if (col >= row) {
+        break;
+      }
+      preconditioner.lower_transpose[static_cast<std::size_t>(col)].push_back(
+          {row, preconditioner.lower[static_cast<std::size_t>(pos)]});
+    }
+  }
+
+  return true;
+}
+
 inline KrylovPreconditioner build_diagonal_preconditioner(const SparseMatrixCSR &matrix) {
   KrylovPreconditioner preconditioner;
   preconditioner.type = PreconditionerType::diagonal;
@@ -319,6 +404,34 @@ inline void apply_preconditioner(const SparseMatrixCSR &matrix, const KrylovPrec
 
   if (static_cast<int>(r.size()) != matrix.n) {
     throw std::runtime_error("preconditioner application size mismatch");
+  }
+
+  if (preconditioner.type == PreconditionerType::incomplete_cholesky) {
+    std::vector<double> y(static_cast<std::size_t>(matrix.n), 0.0);
+    for (int row = 0; row < matrix.n; ++row) {
+      double sum = r[static_cast<std::size_t>(row)];
+      for (int pos = matrix.row_ptr[static_cast<std::size_t>(row)];
+           pos < matrix.row_ptr[static_cast<std::size_t>(row + 1)]; ++pos) {
+        const int col = matrix.col_idx[static_cast<std::size_t>(pos)];
+        if (col >= row) {
+          break;
+        }
+        sum -= preconditioner.lower[static_cast<std::size_t>(pos)] * y[static_cast<std::size_t>(col)];
+      }
+      y[static_cast<std::size_t>(row)] =
+          sum / std::max(preconditioner.diag[static_cast<std::size_t>(row)], preconditioner.diagonal_floor);
+    }
+
+    z = y;
+    for (int row = matrix.n - 1; row >= 0; --row) {
+      double sum = z[static_cast<std::size_t>(row)];
+      for (const LowerTransposeEntry &entry : preconditioner.lower_transpose[static_cast<std::size_t>(row)]) {
+        sum -= entry.value * z[static_cast<std::size_t>(entry.row)];
+      }
+      z[static_cast<std::size_t>(row)] =
+          sum / std::max(preconditioner.diag[static_cast<std::size_t>(row)], preconditioner.diagonal_floor);
+    }
+    return;
   }
 
   std::vector<double> y(static_cast<std::size_t>(matrix.n), 0.0);
@@ -427,6 +540,132 @@ inline LinearSolveReport solve_preconditioned_cg(const SparseMatrixCSR &matrix, 
       p[static_cast<std::size_t>(idx)] = z[static_cast<std::size_t>(idx)] + beta * p[static_cast<std::size_t>(idx)];
     }
     rz_old = rz_new;
+  }
+
+  return report;
+}
+
+inline LinearSolveReport solve_preconditioned_bicgstab(const SparseMatrixCSR &matrix,
+                                                       const KrylovPreconditioner &preconditioner,
+                                                       const std::vector<double> &rhs, int max_iterations,
+                                                       double tolerance, std::vector<double> &x,
+                                                       bool use_relative_tolerance = true) {
+  if (matrix.n <= 0) {
+    throw std::runtime_error("cannot solve an empty linear system");
+  }
+  if (static_cast<int>(rhs.size()) != matrix.n) {
+    throw std::runtime_error("bicgstab rhs size mismatch");
+  }
+
+  if (static_cast<int>(x.size()) != matrix.n) {
+    x.assign(static_cast<std::size_t>(matrix.n), 0.0);
+  }
+
+  std::vector<double> ax;
+  apply_matrix(matrix, x, ax);
+
+  std::vector<double> r(static_cast<std::size_t>(matrix.n), 0.0);
+  for (int idx = 0; idx < matrix.n; ++idx) {
+    r[static_cast<std::size_t>(idx)] = rhs[static_cast<std::size_t>(idx)] - ax[static_cast<std::size_t>(idx)];
+  }
+
+  const double rhs_norm = std::sqrt(std::max(dot_product(rhs, rhs), 0.0));
+  LinearSolveReport report;
+  report.absolute_residual = std::sqrt(std::max(dot_product(r, r), 0.0));
+  report.relative_residual = report.absolute_residual / std::max(rhs_norm, 1.0e-30);
+  if ((use_relative_tolerance && report.relative_residual < tolerance) || report.absolute_residual < tolerance) {
+    return report;
+  }
+
+  std::vector<double> r_hat = r;
+  std::vector<double> p(static_cast<std::size_t>(matrix.n), 0.0);
+  std::vector<double> v(static_cast<std::size_t>(matrix.n), 0.0);
+  std::vector<double> phat;
+  std::vector<double> s(static_cast<std::size_t>(matrix.n), 0.0);
+  std::vector<double> shat;
+  std::vector<double> t(static_cast<std::size_t>(matrix.n), 0.0);
+  std::vector<double> update(static_cast<std::size_t>(matrix.n), 0.0);
+
+  double rho_old = 1.0;
+  double alpha = 1.0;
+  double omega = 1.0;
+  const int iteration_limit = std::max(1, max_iterations);
+
+  for (int iter = 0; iter < iteration_limit; ++iter) {
+    const double rho_new = dot_product(r_hat, r);
+    if (!std::isfinite(rho_new) || std::abs(rho_new) < 1.0e-30) {
+      throw std::runtime_error("bicgstab breakdown: invalid rho");
+    }
+
+    const double beta = (iter == 0) ? 0.0 : (rho_new / rho_old) * (alpha / omega);
+    for (int idx = 0; idx < matrix.n; ++idx) {
+      p[static_cast<std::size_t>(idx)] =
+          r[static_cast<std::size_t>(idx)] +
+          beta * (p[static_cast<std::size_t>(idx)] - omega * v[static_cast<std::size_t>(idx)]);
+    }
+
+    apply_preconditioner(matrix, preconditioner, p, phat);
+    apply_matrix(matrix, phat, v);
+    const double rhat_v = dot_product(r_hat, v);
+    if (!std::isfinite(rhat_v) || std::abs(rhat_v) < 1.0e-30) {
+      throw std::runtime_error("bicgstab breakdown: invalid r_hat^T A M^{-1} p");
+    }
+
+    alpha = rho_new / rhat_v;
+    for (int idx = 0; idx < matrix.n; ++idx) {
+      s[static_cast<std::size_t>(idx)] =
+          r[static_cast<std::size_t>(idx)] - alpha * v[static_cast<std::size_t>(idx)];
+      update[static_cast<std::size_t>(idx)] = alpha * phat[static_cast<std::size_t>(idx)];
+    }
+
+    double s_norm = std::sqrt(std::max(dot_product(s, s), 0.0));
+    if ((use_relative_tolerance && s_norm / std::max(rhs_norm, 1.0e-30) < tolerance) || s_norm < tolerance) {
+      double update_sq = 0.0;
+      double x_norm_sq = 0.0;
+      for (int idx = 0; idx < matrix.n; ++idx) {
+        x[static_cast<std::size_t>(idx)] += update[static_cast<std::size_t>(idx)];
+        update_sq += update[static_cast<std::size_t>(idx)] * update[static_cast<std::size_t>(idx)];
+        x_norm_sq += x[static_cast<std::size_t>(idx)] * x[static_cast<std::size_t>(idx)];
+      }
+      report.iterations = iter + 1;
+      report.iterate_residual = std::sqrt(update_sq / std::max(x_norm_sq, 1.0e-30));
+      report.absolute_residual = s_norm;
+      report.relative_residual = s_norm / std::max(rhs_norm, 1.0e-30);
+      return report;
+    }
+
+    apply_preconditioner(matrix, preconditioner, s, shat);
+    apply_matrix(matrix, shat, t);
+    const double tt = dot_product(t, t);
+    if (!std::isfinite(tt) || std::abs(tt) < 1.0e-30) {
+      throw std::runtime_error("bicgstab breakdown: invalid t^T t");
+    }
+
+    omega = dot_product(t, s) / tt;
+    if (!std::isfinite(omega) || std::abs(omega) < 1.0e-30) {
+      throw std::runtime_error("bicgstab breakdown: invalid omega");
+    }
+
+    double update_sq = 0.0;
+    double x_norm_sq = 0.0;
+    for (int idx = 0; idx < matrix.n; ++idx) {
+      update[static_cast<std::size_t>(idx)] += omega * shat[static_cast<std::size_t>(idx)];
+      x[static_cast<std::size_t>(idx)] += update[static_cast<std::size_t>(idx)];
+      r[static_cast<std::size_t>(idx)] =
+          s[static_cast<std::size_t>(idx)] - omega * t[static_cast<std::size_t>(idx)];
+      update_sq += update[static_cast<std::size_t>(idx)] * update[static_cast<std::size_t>(idx)];
+      x_norm_sq += x[static_cast<std::size_t>(idx)] * x[static_cast<std::size_t>(idx)];
+    }
+
+    report.iterations = iter + 1;
+    report.iterate_residual = std::sqrt(update_sq / std::max(x_norm_sq, 1.0e-30));
+    report.absolute_residual = std::sqrt(std::max(dot_product(r, r), 0.0));
+    report.relative_residual = report.absolute_residual / std::max(rhs_norm, 1.0e-30);
+    if ((use_relative_tolerance && report.relative_residual < tolerance) || report.absolute_residual < tolerance) {
+      return report;
+    }
+
+    rho_old = rho_new;
   }
 
   return report;

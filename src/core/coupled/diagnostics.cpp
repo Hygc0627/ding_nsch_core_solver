@@ -80,31 +80,46 @@ Diagnostics Solver::compute_diagnostics() const {
   diag.rho_max = rho_max;
   diag.eta_min = eta_min;
   diag.eta_max = eta_max;
+  diag.ch_iterations = last_ch_iterations_;
   diag.coupling_iterations = last_coupling_iterations_;
   diag.pressure_iterations = last_pressure_iterations_;
   diag.momentum_iterations = last_momentum_iterations_;
+  diag.ch_solver_name = last_ch_solver_name_;
+  diag.momentum_solver_name = last_momentum_solver_name_;
+  diag.pressure_solver_name = last_pressure_solver_name_;
   return diag;
 }
 
-void Solver::print_diagnostics(int step, const Diagnostics &diag) const {
+std::string Solver::format_step_report(int step, double time, const Diagnostics &diag) const {
   std::ostringstream out;
   out << std::fixed << std::setprecision(6)
-      << "[step " << step << "] mass=" << diag.mass << " mass_drift=" << diag.mass_drift
+      << "[step " << step << "] time=" << time << " dt=" << cfg_.dt
+      << " mass=" << diag.mass << " mass_drift=" << diag.mass_drift
       << " div_l2=" << diag.divergence_l2 << " div_max=" << diag.max_divergence_after_correction
       << " max|mu|=" << diag.max_abs_mu << " max|u|=" << diag.max_velocity;
   out << std::scientific << std::setprecision(3)
-      << " ch_res=" << diag.ch_inner_residual << " ch_eq_res=" << diag.ch_equation_residual
-      << " coupling_res=" << diag.coupling_residual << " p_corr_res=" << diag.pressure_correction_residual
-      << " mom_res=" << diag.momentum_residual;
+      << " ch_solver=" << diag.ch_solver_name
+      << " ch_res=" << diag.ch_inner_residual
+      << " ch_eq_res=" << diag.ch_equation_residual
+      << " mom_solver=" << diag.momentum_solver_name
+      << " mom_res=" << diag.momentum_residual
+      << " p_solver=" << diag.pressure_solver_name
+      << " p_corr_res=" << diag.pressure_correction_residual
+      << " coupling_res=" << diag.coupling_residual;
   out << std::fixed << std::setprecision(6)
       << " bc_pre=" << diag.boundary_speed_pre_correction
       << " bc_post=" << diag.boundary_speed_post_correction << " free_energy=" << diag.total_free_energy
       << " rho=[" << diag.rho_min << "," << diag.rho_max << "]"
       << " eta=[" << diag.eta_min << "," << diag.eta_max << "]"
+      << " ch_it=" << diag.ch_iterations
       << " outer_it=" << diag.coupling_iterations
       << " p_it=" << diag.pressure_iterations
       << " mom_it=" << diag.momentum_iterations;
-  std::cout << out.str() << "\n";
+  return out.str();
+}
+
+void Solver::print_diagnostics(int step, const Diagnostics &diag) const {
+  std::cout << format_step_report(step, static_cast<double>(step) * cfg_.dt, diag) << "\n";
 }
 
 

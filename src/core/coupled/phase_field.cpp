@@ -10,6 +10,20 @@ namespace ding {
 
 using coupled_detail::square;
 
+namespace {
+
+const char *ch_preconditioner_name(ch_sparse_krylov::PreconditionerType type) {
+  if (type == ch_sparse_krylov::PreconditionerType::incomplete_ldlt) {
+    return "SparsePCG[ILDLT]";
+  }
+  if (type == ch_sparse_krylov::PreconditionerType::incomplete_cholesky) {
+    return "SparsePCG[ICC]";
+  }
+  return "SparsePCG[Diagonal]";
+}
+
+} // namespace
+
 void Solver::update_materials_from_phase(const Field2D &c_state, Field2D &rho_state, Field2D &eta_state) const {
   for (int i = 0; i < cfg_.nx; ++i) {
     for (int j = 0; j < cfg_.ny; ++j) {
@@ -289,14 +303,17 @@ void Solver::solve_phase_linear_system_eq25(const Field2D &rhs_field, double tar
   iterate_residual = 0.0;
   equation_residual = 0.0;
   ch_sparse_krylov::LinearSolveReport report;
+  last_ch_solver_name_ = ch_preconditioner_name(ch_linear_system_preconditioner_.type);
   try {
     report = ch_sparse_krylov::solve_preconditioned_cg(ch_linear_system_matrix_, ch_linear_system_preconditioner_, rhs,
                                                        cfg_.ch_inner_iterations, cfg_.ch_tolerance, x);
   } catch (const std::runtime_error &) {
     ch_linear_system_preconditioner_ = ch_sparse_krylov::build_diagonal_preconditioner(ch_linear_system_matrix_);
+    last_ch_solver_name_ = "SparsePCG[DiagonalFallback]";
     report = ch_sparse_krylov::solve_preconditioned_cg(ch_linear_system_matrix_, ch_linear_system_preconditioner_, rhs,
                                                        cfg_.ch_inner_iterations, cfg_.ch_tolerance, x);
   }
+  last_ch_iterations_ = report.iterations;
 
   double current_mean = 0.0;
   for (double value : x) {

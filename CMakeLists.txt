@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
 
 add_library(core_coupled
+  src/core/base/config.cpp
   src/core/coupled/solver.cpp
   src/core/coupled/operators.cpp
   src/core/coupled/phase_field.cpp
