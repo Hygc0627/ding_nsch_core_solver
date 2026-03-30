@@ -1,0 +1,6 @@
+build/
+output/
+*.log
+*.vtk
+*.pvd
+.DS_Store
