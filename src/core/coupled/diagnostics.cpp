@@ -12,6 +12,15 @@ namespace ding {
 
 using coupled_detail::square;
 
+namespace {
+
+constexpr double kAdvectiveSafety = 0.5;
+constexpr double kCapillarySafety = 0.5;
+constexpr double kChExplicitSafety = 0.25;
+constexpr double kTiny = 1.0e-30;
+
+} // namespace
+
 double Solver::compute_mass(const Field2D &field) const {
   double sum = 0.0;
   for (int i = 0; i < cfg_.nx; ++i) {
@@ -34,6 +43,69 @@ double Solver::compute_free_energy() const {
     }
   }
   return energy;
+}
+
+void Solver::populate_timestep_limits(Diagnostics &diag) const {
+  const double h = std::min(dx_, dy_);
+  double max_advective_rate = 0.0;
+  for (int i = 0; i < cfg_.nx; ++i) {
+    for (int j = 0; j < cfg_.ny; ++j) {
+      const double uc = cell_centered_u(u_, i, j);
+      const double vc = cell_centered_v(v_, i, j);
+      max_advective_rate = std::max(max_advective_rate, std::abs(uc) / std::max(dx_, kTiny) +
+                                                            std::abs(vc) / std::max(dy_, kTiny));
+    }
+  }
+  diag.dt_limit_advective =
+      max_advective_rate > kTiny ? kAdvectiveSafety / max_advective_rate : std::numeric_limits<double>::infinity();
+
+  diag.dt_limit_capillary = std::numeric_limits<double>::infinity();
+  diag.dt_limit_ch_explicit = std::numeric_limits<double>::infinity();
+  if (cfg_.mode != "advection_only") {
+    const double rho_scale = std::max(diag.rho_max, kTiny);
+    diag.dt_limit_capillary =
+        kCapillarySafety * std::sqrt(std::max(cfg_.re * cfg_.ca * h * h * h / rho_scale, 0.0));
+
+    const double alpha = 6.0 * std::sqrt(2.0);
+    double mobility_max = 0.0;
+    double max_abs_wpp = 0.0;
+    for (int i = 0; i < cfg_.nx; ++i) {
+      for (int j = 0; j < cfg_.ny; ++j) {
+        const double c = c_(i, j);
+        mobility_max = std::max(mobility_max, std::max(0.0, c * (1.0 - c)));
+        const double wpp = 0.5 - 3.0 * c + 3.0 * c * c;
+        max_abs_wpp = std::max(max_abs_wpp, std::abs(wpp));
+      }
+    }
+
+    if (mobility_max > kTiny) {
+      const double coeff_lap = alpha * mobility_max * max_abs_wpp / std::max(cfg_.pe * cfg_.cn, kTiny);
+      const double coeff_biharm = alpha * mobility_max * cfg_.cn / std::max(cfg_.pe, kTiny);
+      const double dt_lap =
+          coeff_lap > kTiny ? kChExplicitSafety * h * h / coeff_lap : std::numeric_limits<double>::infinity();
+      const double dt_biharm = coeff_biharm > kTiny
+                                   ? kChExplicitSafety * h * h * h * h / coeff_biharm
+                                   : std::numeric_limits<double>::infinity();
+      diag.dt_limit_ch_explicit = std::min(dt_lap, dt_biharm);
+    }
+  }
+
+  diag.dt_limit_active = diag.dt_limit_advective;
+  diag.dt_limit_source = "advective";
+  if (diag.dt_limit_capillary < diag.dt_limit_active) {
+    diag.dt_limit_active = diag.dt_limit_capillary;
+    diag.dt_limit_source = "capillary";
+  }
+  if (diag.dt_limit_ch_explicit < diag.dt_limit_active) {
+    diag.dt_limit_active = diag.dt_limit_ch_explicit;
+    diag.dt_limit_source = "ch_explicit";
+  }
+  if (!std::isfinite(diag.dt_limit_active) || diag.dt_limit_active <= kTiny) {
+    diag.dt_limit_ratio = 0.0;
+    diag.dt_limit_source = "unbounded";
+  } else {
+    diag.dt_limit_ratio = cfg_.dt / diag.dt_limit_active;
+  }
 }
 
 Diagnostics Solver::compute_diagnostics() const {
@@ -80,6 +152,7 @@ Diagnostics Solver::compute_diagnostics() const {
   diag.rho_max = rho_max;
   diag.eta_min = eta_min;
   diag.eta_max = eta_max;
+  populate_timestep_limits(diag);
   diag.ch_iterations = last_ch_iterations_;
   diag.coupling_iterations = last_coupling_iterations_;
   diag.pressure_iterations = last_pressure_iterations_;
@@ -101,11 +174,17 @@ std::string Solver::format_step_report(int step, double time, const Diagnostics 
       << " ch_solver=" << diag.ch_solver_name
       << " ch_res=" << diag.ch_inner_residual
       << " ch_eq_res=" << diag.ch_equation_residual
+      << " dt_lim=" << diag.dt_limit_active
+      << " dt_ratio=" << diag.dt_limit_ratio
+      << " dt_adv=" << diag.dt_limit_advective
+      << " dt_cap=" << diag.dt_limit_capillary
+      << " dt_ch=" << diag.dt_limit_ch_explicit
       << " mom_solver=" << diag.momentum_solver_name
       << " mom_res=" << diag.momentum_residual
       << " p_solver=" << diag.pressure_solver_name
       << " p_corr_res=" << diag.pressure_correction_residual
-      << " coupling_res=" << diag.coupling_residual;
+      << " coupling_res=" << diag.coupling_residual
+      << " dt_src=" << diag.dt_limit_source;
   out << std::fixed << std::setprecision(6)
       << " bc_pre=" << diag.boundary_speed_pre_correction
       << " bc_post=" << diag.boundary_speed_post_correction << " free_energy=" << diag.total_free_energy

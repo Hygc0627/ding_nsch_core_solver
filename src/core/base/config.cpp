@@ -77,9 +77,12 @@ Config load_config(const std::string &path) {
 
   set_string("name", cfg.name);
   set_string("mode", cfg.mode);
+  set_string("phase_initializer", cfg.phase_initializer);
+  set_string("velocity_profile", cfg.velocity_profile);
   set_string("momentum_advection_scheme", cfg.momentum_advection_scheme);
   set_string("pressure_scheme", cfg.pressure_scheme);
   set_string("output_dir", cfg.output_dir);
+  set_string("restart_file", cfg.restart_file);
   set_string("petsc_python_executable", cfg.petsc_python_executable);
   set_string("petsc_solver_script", cfg.petsc_solver_script);
   set_string("petsc_solver_config", cfg.petsc_solver_config);
@@ -93,6 +96,7 @@ Config load_config(const std::string &path) {
   set_int("steps", cfg.steps);
   set_int("output_every", cfg.output_every);
   set_int("write_every", cfg.write_every);
+  set_int("restart_every", cfg.restart_every);
   set_int("coupling_iterations", cfg.coupling_iterations);
   set_int("ch_inner_iterations", cfg.ch_inner_iterations);
   set_int("momentum_iterations", cfg.momentum_iterations);
@@ -119,8 +123,13 @@ Config load_config(const std::string &path) {
   set_double("interface_radius", cfg.interface_radius);
   set_double("interface_amplitude", cfg.interface_amplitude);
   set_double("interface_wavenumber", cfg.interface_wavenumber);
+  set_double("zalesak_slot_width", cfg.zalesak_slot_width);
+  set_double("zalesak_slot_depth", cfg.zalesak_slot_depth);
   set_double("advect_u", cfg.advect_u);
   set_double("advect_v", cfg.advect_v);
+  set_double("rotation_center_x", cfg.rotation_center_x);
+  set_double("rotation_center_y", cfg.rotation_center_y);
+  set_double("angular_velocity", cfg.angular_velocity);
   set_double("top_wall_velocity_x", cfg.top_wall_velocity_x);
   set_double("bottom_wall_velocity_x", cfg.bottom_wall_velocity_x);
   set_double("check_mass_drift_max", cfg.check_mass_drift_max);
@@ -131,6 +140,8 @@ Config load_config(const std::string &path) {
   set_bool("periodic_y", cfg.periodic_y);
   set_bool("verbose", cfg.verbose);
   set_bool("write_vtk", cfg.write_vtk);
+  set_bool("restart", cfg.restart);
+  set_bool("write_restart", cfg.write_restart);
   set_bool("use_phase_clamp_debug_only", cfg.use_phase_clamp_debug_only);
   return cfg;
 }

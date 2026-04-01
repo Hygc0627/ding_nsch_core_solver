@@ -57,6 +57,7 @@ private:
   Diagnostics last_diag_{};
   std::vector<HistoryEntry> history_;
   std::ofstream case_log_;
+  std::ofstream history_csv_stream_;
   double last_boundary_speed_pre_correction_ = 0.0;
   double last_boundary_speed_post_correction_ = 0.0;
   double last_ch_equation_residual_ = 0.0;
@@ -66,9 +67,11 @@ private:
   int last_coupling_iterations_ = 0;
   int current_step_index_ = 0;
   int current_coupling_iteration_ = 0;
+  int restart_step_ = 0;
   mutable std::string last_ch_solver_name_ = "SparsePCG";
   std::string last_momentum_solver_name_ = "StationaryIteration";
   std::string last_pressure_solver_name_ = "Uninitialized";
+  bool restarted_from_snapshot_ = false;
   mutable bool ch_operator_matrices_ready_ = false;
   mutable ch_sparse_krylov::SparseMatrixCSR ch_laplacian_matrix_;
   mutable ch_sparse_krylov::SparseMatrixCSR ch_biharmonic_matrix_;
@@ -78,6 +81,8 @@ private:
 
   void initialize_phase();
   void initialize_velocity();
+  void initialize_zalesak_disk();
+  void fill_solid_body_rotation_velocity(Field2D &u_state, Field2D &v_state) const;
   void ensure_ch_operator_matrices() const;
   void ensure_ch_linear_system(double alpha0) const;
 
@@ -93,6 +98,7 @@ private:
   void update_surface_tension_force(const Field2D &c_old, const Field2D &c_new);
 
   bool advance_one_timestep(int step);
+  double solve_phase_advection_only(const Field2D &u_adv, const Field2D &v_adv);
   double solve_cahn_hilliard_semi_implicit(const Field2D &u_adv, const Field2D &v_adv, int step);
   void build_phase_advection_fluxes(const Field2D &c_state, const Field2D &u_adv, const Field2D &v_adv,
                                     Field2D &adv_flux_x, Field2D &adv_flux_y, Field2D &adv_rhs) const;
@@ -100,7 +106,7 @@ private:
                                     Field2D &flux_y, Field2D &divergence) const;
   void build_phase_explicit_operator(const Field2D &c_state, const Field2D &u_adv, const Field2D &v_adv,
                                      Field2D &explicit_operator) const;
-  void solve_phase_linear_system_eq25(const Field2D &rhs_field, double target_mean, Field2D &c_state,
+  void solve_phase_linear_system_eq25(const Field2D &rhs_field, double alpha0, double target_mean, Field2D &c_state,
                                       double &iterate_residual, double &equation_residual) const;
   void compute_momentum_fluxes(Field2D &u_adv, Field2D &v_adv) const;
   double solve_momentum_predictor(const Field2D &u_adv, const Field2D &v_adv, int step);
@@ -112,6 +118,7 @@ private:
   double compute_mass(const Field2D &field) const;
   double compute_free_energy() const;
   Diagnostics compute_diagnostics() const;
+  void populate_timestep_limits(Diagnostics &diag) const;
   void print_diagnostics(int step, const Diagnostics &diag) const;
   std::string format_step_report(int step, double time, const Diagnostics &diag) const;
   void write_visualization(int step) const;
@@ -121,11 +128,21 @@ private:
   void write_final_cell_fields_csv() const;
   std::string case_output_dir() const;
   std::string case_log_path() const;
+  std::string history_csv_path() const;
   std::string pressure_solver_dir() const;
+  std::string restart_snapshot_path() const;
   void open_case_log();
   void close_case_log();
+  void open_history_csv_stream();
+  void close_history_csv_stream();
+  void write_history_csv_header(std::ostream &out) const;
+  void append_history_csv_entry(int step, double time, const Diagnostics &diag);
   void log_message(const std::string &message);
   void log_run_header();
+  bool should_write_restart(int step) const;
+  void write_restart_snapshot(int step) const;
+  void load_restart_snapshot();
+  void load_history_csv();
 
   double laplacian_center(const Field2D &field, int i, int j) const;
   double grad_center_x(const Field2D &field, int i, int j) const;

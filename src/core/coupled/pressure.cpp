@@ -782,11 +782,13 @@ double Solver::solve_pressure_correction() {
   } else if (cfg_.pressure_scheme == "hydea") {
     solver_name = "HyDEA";
     residual = solve_pressure_correction_hydea();
-  } else if (cfg_.pressure_scheme == "liu_split_icpcg" || cfg_.pressure_scheme == "split_icpcg") {
-    solver_name = "LiuSplitICCPCG";
+  } else if (cfg_.pressure_scheme == "liu_split_icpcg" || cfg_.pressure_scheme == "split_icpcg" ||
+             cfg_.pressure_scheme == "paper_split_icpcg") {
+    solver_name = "SplitICCPCG";
     residual = solve_pressure_correction_liu_split_icpcg();
-  } else if (cfg_.pressure_scheme == "liu_split_ildlt_pcg" || cfg_.pressure_scheme == "split_ildlt_pcg") {
-    solver_name = "LiuSplitILDLTPCG";
+  } else if (cfg_.pressure_scheme == "liu_split_ildlt_pcg" || cfg_.pressure_scheme == "split_ildlt_pcg" ||
+             cfg_.pressure_scheme == "paper_split_ildlt_pcg") {
+    solver_name = "SplitILDLTPCG";
     residual = solve_pressure_correction_liu_split_ildlt_pcg();
   } else if (cfg_.pressure_scheme == "icpcg") {
     solver_name = "ICCPCG";

@@ -44,6 +44,13 @@ cmake --build build -j
 ./build/ding_nsch testcases/04_coupled_capillary_smoke.cfg
 ```
 
+Restart 示例：
+
+```bash
+./build/ding_nsch testcases/13_restart_smoke_initial.cfg
+./build/ding_nsch testcases/14_restart_smoke_resume.cfg
+```
+
 ## Test
 
 ```bash
@@ -65,9 +72,11 @@ ctest --test-dir build --output-on-failure
   真正的 ICC(0)-preconditioned CG。
 - `ildlt_pcg`
   旧的 ILDLT-preconditioned CG 路径，已从原先误称的 `icpcg` 正名。
-- `liu_split_icpcg`
-  Liu split 常系数泊松 + ICC(0)-preconditioned CG。
-- `liu_split_ildlt_pcg`
-  Liu split 常系数泊松 + ILDLT-preconditioned CG。
+- `liu_split_icpcg` / `split_icpcg` / `paper_split_icpcg`
+  将变系数压力泊松分裂成常系数隐式部分和显式变系数部分，对应
+  `1/rho grad p = 1/rho_ref grad p + (1/rho - 1/rho_ref) grad(2p^l - p^{l-1})`，
+  隐式常系数泊松用 ICC(0)-preconditioned CG。
+- `liu_split_ildlt_pcg` / `split_ildlt_pcg` / `paper_split_ildlt_pcg`
+  同一套 split Poisson 公式，但隐式常系数泊松用 ILDLT-preconditioned CG。
 
 代码中仍保留了 `petsc_pcg` 和 `hydea` 两个外部后端接口，但这个独立仓库没有打包对应 Python 驱动脚本。只有在你另外提供这些脚本，并正确设置 `PETSC_DIR` / `PETSC_ARCH` 环境变量时，才应启用它们。

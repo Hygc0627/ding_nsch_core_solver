@@ -121,7 +121,7 @@ def write_svg_plot(rows, path):
   plot_width = width - margin_left - margin_right
   plot_height = height - margin_top - margin_bottom
 
-  x_values = [row["time"] for row in rows]
+  x_values = [row["shear_time"] for row in rows]
   y_values = [row["taylor_deformation"] for row in rows]
   x_min = min(x_values)
   x_max = max(x_values)
@@ -149,7 +149,7 @@ def write_svg_plot(rows, path):
       f'<line x1="{margin_left}" y1="{margin_top + plot_height}" x2="{margin_left + plot_width}" y2="{margin_top + plot_height}" stroke="black" stroke-width="1.5"/>',
       f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_height}" stroke="black" stroke-width="1.5"/>',
       f'<polyline fill="none" stroke="#005f73" stroke-width="2" points="{polyline}"/>',
-      f'<text x="{width / 2:.1f}" y="{height - 20}" text-anchor="middle" font-size="16">time</text>',
+      f'<text x="{width / 2:.1f}" y="{height - 20}" text-anchor="middle" font-size="16">shear time (gamma_dot t)</text>',
       f'<text x="22" y="{height / 2:.1f}" text-anchor="middle" font-size="16" transform="rotate(-90 22 {height / 2:.1f})">Taylor deformation D</text>',
   ]
 

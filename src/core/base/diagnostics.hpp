@@ -25,6 +25,11 @@ struct Diagnostics {
   double rho_max = 0.0;
   double eta_min = 0.0;
   double eta_max = 0.0;
+  double dt_limit_advective = 0.0;
+  double dt_limit_capillary = 0.0;
+  double dt_limit_ch_explicit = 0.0;
+  double dt_limit_active = 0.0;
+  double dt_limit_ratio = 0.0;
   int ch_iterations = 0;
   int coupling_iterations = 0;
   int pressure_iterations = 0;
@@ -32,6 +37,7 @@ struct Diagnostics {
   std::string ch_solver_name;
   std::string momentum_solver_name;
   std::string pressure_solver_name;
+  std::string dt_limit_source;
 };
 
 struct HistoryEntry {

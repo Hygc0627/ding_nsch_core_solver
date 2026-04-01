@@ -91,6 +91,14 @@ periodic_y = true
   是否把逐步日志打印到终端。无论这个值是什么，`run.log` 都会写到 case 目录。
 - `write_vtk`
   是否写 VTK/PVD 可视化文件。
+- `write_restart`
+  是否写 restart 快照。默认会在 case 目录里维护一个 `restart_latest.bin`。
+- `restart_every`
+  restart 快照写出频率。`<= 0` 时自动退化为 `write_every`。
+- `restart`
+  是否从 restart 快照恢复并继续运行。
+- `restart_file`
+  restart 快照路径。留空时默认读 `<output_dir>/<name>/restart_latest.bin`。
 
 ### 4.2 网格与几何
 
@@ -137,8 +145,10 @@ eta(c) = c + (1 - c) * viscosity_ratio
 
 ## 5. 相分数怎么初始化
 
-当前主程序不支持从外部文件读入初始 `c` 场，也不支持 restart。
-它只支持两种内置初始化方式。
+当前主程序不支持从外部文件读入任意初始 `c` 场，但现在支持从 restart 快照恢复。
+
+- 不启用 restart 时，只支持下面两种内置初始化方式。
+- 启用 restart 时，会跳过内置初始化，直接从快照恢复相场、速度、压力和多步历史量。
 
 ### 5.1 圆形液滴初始化
 
@@ -460,9 +470,11 @@ bottom_wall_velocity_x = ...
 - `summary.csv`
   最终一步汇总。
 - `history.csv`
-  全部时间步的结构化历史数据。
+  全部时间步的结构化历史数据。现在按步持续落盘，方便 crash 后继续保留已完成历史。
 - `final_cell_fields.csv`
   最终单元中心场，包括 `c`、`rho`、`eta`、`pressure`、`mu`、速度和散度。
+- `restart_latest.bin`
+  最近一次 restart 快照。包含继续时间推进所需的当前场和多步历史量。
 - `*.vtk`
   VTK 可视化文件。
 - `*.pvd`
@@ -472,9 +484,70 @@ bottom_wall_velocity_x = ...
 
 - `pressure_solver/`
 
-## 11. 推荐的最小 case 模板
+## 11. Restart 用法
 
-### 11.1 周期静止液滴
+最简单的继续运行方式是保持同一个 `name` 和 `output_dir`，然后把 `steps` 改大：
+
+```ini
+name = my_case
+output_dir = output
+steps = 200000
+write_restart = true
+restart_every = 500
+```
+
+第一次正常起算：
+
+```ini
+restart = false
+```
+
+中断后继续：
+
+```ini
+restart = true
+restart_file =
+```
+
+这时程序会默认读取：
+
+```text
+<output_dir>/<name>/restart_latest.bin
+```
+
+如果你想从别的位置恢复，也可以显式指定：
+
+```ini
+restart = true
+restart_file = /abs/path/to/restart_latest.bin
+```
+
+restart 时允许你修改：
+
+- `steps`
+- `output_every`
+- `write_every`
+- `restart_every`
+- `verbose`
+- `write_vtk`
+- `pressure_scheme`
+
+restart 时不应该修改：
+
+- `nx`, `ny`, `ghost`
+- `dt`
+- `lx`, `ly`
+- `re`, `ca`, `pe`, `cn`
+- `density_ratio`, `viscosity_ratio`
+- `periodic_x`, `periodic_y`
+- `body_force_x`, `body_force_y`
+- `top_wall_velocity_x`, `bottom_wall_velocity_x`
+
+这些量如果和快照不一致，程序会直接拒绝加载。
+
+## 12. 推荐的最小 case 模板
+
+### 12.1 周期静止液滴
 
 ```ini
 name = my_static_droplet
@@ -516,7 +589,7 @@ verbose = false
 output_dir = output
 ```
 
-### 11.2 剪切流下液滴变形
+### 12.2 剪切流下液滴变形
 
 ```ini
 name = my_shear_droplet

@@ -197,18 +197,11 @@ double Solver::solve_momentum_predictor(const Field2D &u_adv, const Field2D &v_a
     } else if (i <= 0 || i >= cfg_.nx) {
       return false;
     }
-    if (!cfg_.periodic_y && (j <= 0 || j >= cfg_.ny - 1)) {
-      return false;
-    }
     return true;
   };
 
   auto v_is_active = [&](int i, int j) {
-    if (cfg_.periodic_x) {
-      if (i < 0 || i >= v_.nx) {
-        return false;
-      }
-    } else if (i <= 0 || i >= v_.nx - 1) {
+    if (i < 0 || i >= v_.nx) {
       return false;
     }
     if (cfg_.periodic_y) {
@@ -329,12 +322,38 @@ double Solver::solve_momentum_predictor(const Field2D &u_adv, const Field2D &v_a
     }
   };
 
+  auto add_u_y_entry = [&](int row, int ui, int uj, double value, int owner_i, int owner_j) {
+    if (u_is_active(ui, uj)) {
+      row_maps[static_cast<std::size_t>(row)][u_row(ui, uj)] += value;
+      return;
+    }
+    if (!cfg_.periodic_y && (uj < 0 || uj >= u_.ny)) {
+      const double wall_speed = (uj < 0) ? cfg_.bottom_wall_velocity_x : cfg_.top_wall_velocity_x;
+      row_maps[static_cast<std::size_t>(row)][u_row(owner_i, owner_j)] -= value;
+      rhs[static_cast<std::size_t>(row)] -= value * (2.0 * wall_speed);
+      return;
+    }
+    rhs[static_cast<std::size_t>(row)] -= value * u_boundary_value(ui, uj);
+  };
+
   auto add_v_entry = [&](int row, int vi, int vj, double value) {
     if (v_is_active(vi, vj)) {
       row_maps[static_cast<std::size_t>(row)][v_row(vi, vj)] += value;
     } else {
       rhs[static_cast<std::size_t>(row)] -= value * v_boundary_value(vi, vj);
     }
+  };
+
+  auto add_v_x_entry = [&](int row, int vi, int vj, double value, int owner_i, int owner_j) {
+    if (v_is_active(vi, vj)) {
+      row_maps[static_cast<std::size_t>(row)][v_row(vi, vj)] += value;
+      return;
+    }
+    if (!cfg_.periodic_x && (vi < 0 || vi >= v_.nx)) {
+      row_maps[static_cast<std::size_t>(row)][v_row(owner_i, owner_j)] -= value;
+      return;
+    }
+    rhs[static_cast<std::size_t>(row)] -= value * v_boundary_value(vi, vj);
   };
 
   for (int i = 0; i < u_.nx; ++i) {
@@ -363,8 +382,8 @@ double Solver::solve_momentum_predictor(const Field2D &u_adv, const Field2D &v_a
 
       add_u_entry(row, canonical_u_i(i + 1), j, -alpha * coeff_e);
       add_u_entry(row, canonical_u_i(i - 1), j, -alpha * coeff_w);
-      add_u_entry(row, i, canonical_u_j(j + 1), -alpha * coeff_n);
-      add_u_entry(row, i, canonical_u_j(j - 1), -alpha * coeff_s);
+      add_u_y_entry(row, i, canonical_u_j(j + 1), -alpha * coeff_n, i, j);
+      add_u_y_entry(row, i, canonical_u_j(j - 1), -alpha * coeff_s, i, j);
 
       add_v_entry(row, canonical_v_i(i), canonical_v_j(j + 1), -alpha * cross_n);
       add_v_entry(row, canonical_v_i(i - 1), canonical_v_j(j + 1), alpha * cross_n);
@@ -397,8 +416,8 @@ double Solver::solve_momentum_predictor(const Field2D &u_adv, const Field2D &v_a
 
       row_maps[static_cast<std::size_t>(row)][row] += rho_face + alpha * (coeff_e + coeff_w + coeff_n + coeff_s);
 
-      add_v_entry(row, canonical_v_i(i + 1), j, -alpha * coeff_e);
-      add_v_entry(row, canonical_v_i(i - 1), j, -alpha * coeff_w);
+      add_v_x_entry(row, canonical_v_i(i + 1), j, -alpha * coeff_e, i, j);
+      add_v_x_entry(row, canonical_v_i(i - 1), j, -alpha * coeff_w, i, j);
       add_v_entry(row, i, canonical_v_j(j + 1), -alpha * coeff_n);
       add_v_entry(row, i, canonical_v_j(j - 1), -alpha * coeff_s);
 

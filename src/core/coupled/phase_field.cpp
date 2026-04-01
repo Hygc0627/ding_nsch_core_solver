@@ -282,9 +282,48 @@ void Solver::build_phase_explicit_operator(const Field2D &c_state, const Field2D
   apply_scalar_bc(explicit_operator);
 }
 
-void Solver::solve_phase_linear_system_eq25(const Field2D &rhs_field, double target_mean, Field2D &c_state,
-                                            double &iterate_residual, double &equation_residual) const {
-  const double alpha0 = 3.0 / (2.0 * cfg_.dt);
+double Solver::solve_phase_advection_only(const Field2D &u_adv, const Field2D &v_adv) {
+  Field2D adv_flux_x(cfg_.nx + 1, cfg_.ny, cfg_.ghost, 0.0);
+  Field2D adv_flux_y(cfg_.nx, cfg_.ny + 1, cfg_.ghost, 0.0);
+  Field2D rhs_stage(cfg_.nx, cfg_.ny, cfg_.ghost, 0.0);
+  Field2D c0 = c_;
+  Field2D c1 = c_;
+  Field2D c2 = c_;
+
+  build_phase_advection_fluxes(c0, u_adv, v_adv, adv_flux_x, adv_flux_y, rhs_stage);
+  phase_advection_rhs_ = rhs_stage;
+  for (int i = 0; i < cfg_.nx; ++i) {
+    for (int j = 0; j < cfg_.ny; ++j) {
+      c1(i, j) = clamp_phase_debug(c0(i, j) + cfg_.dt * rhs_stage(i, j));
+    }
+  }
+  apply_scalar_bc(c1);
+
+  build_phase_advection_fluxes(c1, u_adv, v_adv, adv_flux_x, adv_flux_y, rhs_stage);
+  for (int i = 0; i < cfg_.nx; ++i) {
+    for (int j = 0; j < cfg_.ny; ++j) {
+      const double predictor = c1(i, j) + cfg_.dt * rhs_stage(i, j);
+      c2(i, j) = clamp_phase_debug(0.75 * c0(i, j) + 0.25 * predictor);
+    }
+  }
+  apply_scalar_bc(c2);
+
+  build_phase_advection_fluxes(c2, u_adv, v_adv, adv_flux_x, adv_flux_y, rhs_stage);
+  for (int i = 0; i < cfg_.nx; ++i) {
+    for (int j = 0; j < cfg_.ny; ++j) {
+      const double predictor = c2(i, j) + cfg_.dt * rhs_stage(i, j);
+      c_(i, j) = clamp_phase_debug((1.0 / 3.0) * c0(i, j) + (2.0 / 3.0) * predictor);
+    }
+  }
+  apply_scalar_bc(c_);
+  phase_advection_rhs_prev_ = rhs_stage;
+
+  return field_diff_l2(c_, c0, 0, cfg_.nx, 0, cfg_.ny);
+}
+
+void Solver::solve_phase_linear_system_eq25(const Field2D &rhs_field, double alpha0, double target_mean,
+                                            Field2D &c_state, double &iterate_residual,
+                                            double &equation_residual) const {
   ensure_ch_linear_system(alpha0);
 
   const int n = cfg_.nx * cfg_.ny;
@@ -363,6 +402,7 @@ double Solver::solve_cahn_hilliard_semi_implicit(const Field2D &u_adv, const Fie
   // This implementation matches that split BDF2/AB2/stabilized structure.
   // The implicit CH subproblem is assembled as a sparse matrix and solved with a Krylov method.
   build_phase_explicit_operator(c_, u_adv, v_adv, explicit_operator_n);
+  const double alpha0 = (step == 0) ? (1.0 / cfg_.dt) : (3.0 / (2.0 * cfg_.dt));
 
   for (int i = 0; i < cfg_.nx; ++i) {
     for (int j = 0; j < cfg_.ny; ++j) {
@@ -382,7 +422,7 @@ double Solver::solve_cahn_hilliard_semi_implicit(const Field2D &u_adv, const Fie
                                        (3.0 * cfg_.lx * cfg_.ly);
   double iterate_residual = 0.0;
   double equation_residual = 0.0;
-  solve_phase_linear_system_eq25(rhs_field, target_mean, c_state, iterate_residual, equation_residual);
+  solve_phase_linear_system_eq25(rhs_field, alpha0, target_mean, c_state, iterate_residual, equation_residual);
 
   c_ = c_state;
   apply_scalar_bc(c_);

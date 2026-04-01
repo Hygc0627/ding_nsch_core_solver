@@ -37,12 +37,6 @@ void Solver::apply_u_bc(Field2D &field) const {
       field(i, field.ny - 1 + g) = cfg_.periodic_y ? field(i, g - 1) : -field(i, field.ny - g);
     }
   }
-  if (!cfg_.periodic_y) {
-    for (int i = 0; i < field.nx; ++i) {
-      field(i, 0) = 0.0;
-      field(i, field.ny - 1) = 0.0;
-    }
-  }
 }
 
 void Solver::apply_u_velocity_bc(Field2D &field) const {
@@ -63,10 +57,6 @@ void Solver::apply_u_velocity_bc(Field2D &field) const {
       field(i, field.ny - 1 + g) = 2.0 * top_wall - field(i, field.ny - g);
     }
   }
-  for (int i = 0; i < field.nx; ++i) {
-    field(i, 0) = bottom_wall;
-    field(i, field.ny - 1) = top_wall;
-  }
 }
 
 void Solver::apply_v_bc(Field2D &field) const {
@@ -83,12 +73,6 @@ void Solver::apply_v_bc(Field2D &field) const {
     for (int i = -field.ghost; i < field.nx + field.ghost; ++i) {
       field(i, -g) = cfg_.periodic_y ? field(i, field.ny - g - 1) : 0.0;
       field(i, field.ny - 1 + g) = cfg_.periodic_y ? field(i, g) : 0.0;
-    }
-  }
-  if (!cfg_.periodic_x) {
-    for (int j = 0; j < field.ny; ++j) {
-      field(0, j) = 0.0;
-      field(field.nx - 1, j) = 0.0;
     }
   }
 }
@@ -210,7 +194,8 @@ double Solver::pressure_gradient_v_face(const Field2D &pressure_like, int i, int
 
 bool Solver::use_liu_pressure_split() const {
   return cfg_.pressure_scheme == "liu_split_icpcg" || cfg_.pressure_scheme == "split_icpcg" ||
-         cfg_.pressure_scheme == "liu_split_ildlt_pcg" || cfg_.pressure_scheme == "split_ildlt_pcg";
+         cfg_.pressure_scheme == "paper_split_icpcg" || cfg_.pressure_scheme == "liu_split_ildlt_pcg" ||
+         cfg_.pressure_scheme == "split_ildlt_pcg" || cfg_.pressure_scheme == "paper_split_ildlt_pcg";
 }
 
 double Solver::liu_split_reference_density() const { return std::min(1.0, cfg_.density_ratio); }
