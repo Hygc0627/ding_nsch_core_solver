@@ -40,8 +40,8 @@ struct Config {
   double cn = 0.02;
   double density_ratio = 0.1;
   double viscosity_ratio = 0.1;
-  double stabilization_a1 = 4.0;
-  double stabilization_a2 = 0.5;
+  double stabilization_a1 = 0.03125;
+  double stabilization_a2 = 0.125;
   double coupling_tolerance = 1.0e-6;
   double ch_tolerance = 1.0e-8;
   double pressure_tolerance = 1.0e-8;
