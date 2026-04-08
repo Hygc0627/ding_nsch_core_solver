@@ -266,22 +266,14 @@ double Solver::solve_momentum_predictor(const Field2D &u_adv, const Field2D &v_a
     return j;
   };
 
-  auto u_boundary_value = [&](int i, int j) {
-    if (!cfg_.periodic_x && (i <= 0 || i >= cfg_.nx)) {
-      return 0.0;
-    }
-    if (!cfg_.periodic_y) {
-      if (j <= 0) {
-        return cfg_.bottom_wall_velocity_x;
-      }
-      if (j >= cfg_.ny - 1) {
-        return cfg_.top_wall_velocity_x;
-      }
-    }
-    return 0.0;
-  };
-
-  auto v_boundary_value = [&](int, int) { return 0.0; };
+  const BoundaryConditionSpec left_u_bc = effective_u_bc(BoundarySide::left);
+  const BoundaryConditionSpec right_u_bc = effective_u_bc(BoundarySide::right);
+  const BoundaryConditionSpec bottom_u_bc = effective_u_bc(BoundarySide::bottom);
+  const BoundaryConditionSpec top_u_bc = effective_u_bc(BoundarySide::top);
+  const BoundaryConditionSpec left_v_bc = effective_v_bc(BoundarySide::left);
+  const BoundaryConditionSpec right_v_bc = effective_v_bc(BoundarySide::right);
+  const BoundaryConditionSpec bottom_v_bc = effective_v_bc(BoundarySide::bottom);
+  const BoundaryConditionSpec top_v_bc = effective_v_bc(BoundarySide::top);
 
   std::vector<int> u_row_of(static_cast<std::size_t>(u_.nx * u_.ny), -1);
   std::vector<int> v_row_of(static_cast<std::size_t>(v_.nx * v_.ny), -1);
@@ -314,46 +306,90 @@ double Solver::solve_momentum_predictor(const Field2D &u_adv, const Field2D &v_a
   auto u_row = [&](int i, int j) { return u_row_of[static_cast<std::size_t>(u_flat(i, j))]; };
   auto v_row = [&](int i, int j) { return u_unknowns + v_row_of[static_cast<std::size_t>(v_flat(i, j))]; };
 
-  auto add_u_entry = [&](int row, int ui, int uj, double value) {
+  auto add_u_x_entry = [&](int row, int ui, int uj, double value) {
     if (u_is_active(ui, uj)) {
       row_maps[static_cast<std::size_t>(row)][u_row(ui, uj)] += value;
-    } else {
-      rhs[static_cast<std::size_t>(row)] -= value * u_boundary_value(ui, uj);
+      return;
     }
+
+    if (!cfg_.periodic_x && (ui <= 0 || ui >= cfg_.nx)) {
+      const bool is_left = ui <= 0;
+      const BoundaryConditionSpec bc = is_left ? left_u_bc : right_u_bc;
+      if (bc.type == BoundaryConditionType::dirichlet) {
+        rhs[static_cast<std::size_t>(row)] -= value * bc.value;
+      } else {
+        const int interior_i = is_left ? 1 : cfg_.nx - 1;
+        row_maps[static_cast<std::size_t>(row)][u_row(interior_i, uj)] += value;
+        rhs[static_cast<std::size_t>(row)] -= value * bc.value * dx_;
+      }
+      return;
+    }
+
+    throw std::runtime_error("unexpected inactive u x-neighbor in momentum predictor");
   };
 
-  auto add_u_y_entry = [&](int row, int ui, int uj, double value, int owner_i, int owner_j) {
+  auto add_u_y_entry = [&](int row, int ui, int uj, double value) {
     if (u_is_active(ui, uj)) {
       row_maps[static_cast<std::size_t>(row)][u_row(ui, uj)] += value;
       return;
     }
     if (!cfg_.periodic_y && (uj < 0 || uj >= u_.ny)) {
-      const double wall_speed = (uj < 0) ? cfg_.bottom_wall_velocity_x : cfg_.top_wall_velocity_x;
-      row_maps[static_cast<std::size_t>(row)][u_row(owner_i, owner_j)] -= value;
-      rhs[static_cast<std::size_t>(row)] -= value * (2.0 * wall_speed);
+      const bool is_bottom = uj < 0;
+      const BoundaryConditionSpec bc = is_bottom ? bottom_u_bc : top_u_bc;
+      const int interior_j = is_bottom ? 0 : u_.ny - 1;
+      if (bc.type == BoundaryConditionType::dirichlet) {
+        row_maps[static_cast<std::size_t>(row)][u_row(ui, interior_j)] -= value;
+        rhs[static_cast<std::size_t>(row)] -= value * (2.0 * bc.value);
+      } else {
+        row_maps[static_cast<std::size_t>(row)][u_row(ui, interior_j)] += value;
+        rhs[static_cast<std::size_t>(row)] -= value * bc.value * dy_;
+      }
       return;
     }
-    rhs[static_cast<std::size_t>(row)] -= value * u_boundary_value(ui, uj);
+    throw std::runtime_error("unexpected inactive u y-neighbor in momentum predictor");
   };
 
-  auto add_v_entry = [&](int row, int vi, int vj, double value) {
+  auto add_v_y_entry = [&](int row, int vi, int vj, double value) {
     if (v_is_active(vi, vj)) {
       row_maps[static_cast<std::size_t>(row)][v_row(vi, vj)] += value;
-    } else {
-      rhs[static_cast<std::size_t>(row)] -= value * v_boundary_value(vi, vj);
+      return;
     }
+
+    if (!cfg_.periodic_y && (vj <= 0 || vj >= cfg_.ny)) {
+      const bool is_bottom = vj <= 0;
+      const BoundaryConditionSpec bc = is_bottom ? bottom_v_bc : top_v_bc;
+      if (bc.type == BoundaryConditionType::dirichlet) {
+        rhs[static_cast<std::size_t>(row)] -= value * bc.value;
+      } else {
+        const int interior_j = is_bottom ? 1 : cfg_.ny - 1;
+        row_maps[static_cast<std::size_t>(row)][v_row(vi, interior_j)] += value;
+        rhs[static_cast<std::size_t>(row)] -= value * bc.value * dy_;
+      }
+      return;
+    }
+
+    throw std::runtime_error("unexpected inactive v y-neighbor in momentum predictor");
   };
 
-  auto add_v_x_entry = [&](int row, int vi, int vj, double value, int owner_i, int owner_j) {
+  auto add_v_x_entry = [&](int row, int vi, int vj, double value) {
     if (v_is_active(vi, vj)) {
       row_maps[static_cast<std::size_t>(row)][v_row(vi, vj)] += value;
       return;
     }
     if (!cfg_.periodic_x && (vi < 0 || vi >= v_.nx)) {
-      row_maps[static_cast<std::size_t>(row)][v_row(owner_i, owner_j)] -= value;
+      const bool is_left = vi < 0;
+      const BoundaryConditionSpec bc = is_left ? left_v_bc : right_v_bc;
+      const int interior_i = is_left ? 0 : v_.nx - 1;
+      if (bc.type == BoundaryConditionType::dirichlet) {
+        row_maps[static_cast<std::size_t>(row)][v_row(interior_i, vj)] -= value;
+        rhs[static_cast<std::size_t>(row)] -= value * (2.0 * bc.value);
+      } else {
+        row_maps[static_cast<std::size_t>(row)][v_row(interior_i, vj)] += value;
+        rhs[static_cast<std::size_t>(row)] -= value * bc.value * dx_;
+      }
       return;
     }
-    rhs[static_cast<std::size_t>(row)] -= value * v_boundary_value(vi, vj);
+    throw std::runtime_error("unexpected inactive v x-neighbor in momentum predictor");
   };
 
   for (int i = 0; i < u_.nx; ++i) {
@@ -380,15 +416,15 @@ double Solver::solve_momentum_predictor(const Field2D &u_adv, const Field2D &v_a
 
       row_maps[static_cast<std::size_t>(row)][row] += rho_face + alpha * (coeff_e + coeff_w + coeff_n + coeff_s);
 
-      add_u_entry(row, canonical_u_i(i + 1), j, -alpha * coeff_e);
-      add_u_entry(row, canonical_u_i(i - 1), j, -alpha * coeff_w);
-      add_u_y_entry(row, i, canonical_u_j(j + 1), -alpha * coeff_n, i, j);
-      add_u_y_entry(row, i, canonical_u_j(j - 1), -alpha * coeff_s, i, j);
+      add_u_x_entry(row, canonical_u_i(i + 1), j, -alpha * coeff_e);
+      add_u_x_entry(row, canonical_u_i(i - 1), j, -alpha * coeff_w);
+      add_u_y_entry(row, i, canonical_u_j(j + 1), -alpha * coeff_n);
+      add_u_y_entry(row, i, canonical_u_j(j - 1), -alpha * coeff_s);
 
-      add_v_entry(row, canonical_v_i(i), canonical_v_j(j + 1), -alpha * cross_n);
-      add_v_entry(row, canonical_v_i(i - 1), canonical_v_j(j + 1), alpha * cross_n);
-      add_v_entry(row, canonical_v_i(i), canonical_v_j(j), alpha * cross_s);
-      add_v_entry(row, canonical_v_i(i - 1), canonical_v_j(j), -alpha * cross_s);
+      add_v_y_entry(row, canonical_v_i(i), canonical_v_j(j + 1), -alpha * cross_n);
+      add_v_y_entry(row, canonical_v_i(i - 1), canonical_v_j(j + 1), alpha * cross_n);
+      add_v_y_entry(row, canonical_v_i(i), canonical_v_j(j), alpha * cross_s);
+      add_v_y_entry(row, canonical_v_i(i - 1), canonical_v_j(j), -alpha * cross_s);
     }
   }
 
@@ -416,15 +452,15 @@ double Solver::solve_momentum_predictor(const Field2D &u_adv, const Field2D &v_a
 
       row_maps[static_cast<std::size_t>(row)][row] += rho_face + alpha * (coeff_e + coeff_w + coeff_n + coeff_s);
 
-      add_v_x_entry(row, canonical_v_i(i + 1), j, -alpha * coeff_e, i, j);
-      add_v_x_entry(row, canonical_v_i(i - 1), j, -alpha * coeff_w, i, j);
-      add_v_entry(row, i, canonical_v_j(j + 1), -alpha * coeff_n);
-      add_v_entry(row, i, canonical_v_j(j - 1), -alpha * coeff_s);
+      add_v_x_entry(row, canonical_v_i(i + 1), j, -alpha * coeff_e);
+      add_v_x_entry(row, canonical_v_i(i - 1), j, -alpha * coeff_w);
+      add_v_y_entry(row, i, canonical_v_j(j + 1), -alpha * coeff_n);
+      add_v_y_entry(row, i, canonical_v_j(j - 1), -alpha * coeff_s);
 
-      add_u_entry(row, canonical_u_i(i + 1), canonical_u_j(j), -alpha * cross_e);
-      add_u_entry(row, canonical_u_i(i + 1), canonical_u_j(j - 1), alpha * cross_e);
-      add_u_entry(row, canonical_u_i(i), canonical_u_j(j), alpha * cross_w);
-      add_u_entry(row, canonical_u_i(i), canonical_u_j(j - 1), -alpha * cross_w);
+      add_u_x_entry(row, canonical_u_i(i + 1), canonical_u_j(j), -alpha * cross_e);
+      add_u_x_entry(row, canonical_u_i(i + 1), canonical_u_j(j - 1), alpha * cross_e);
+      add_u_x_entry(row, canonical_u_i(i), canonical_u_j(j), alpha * cross_w);
+      add_u_x_entry(row, canonical_u_i(i), canonical_u_j(j - 1), -alpha * cross_w);
     }
   }
 

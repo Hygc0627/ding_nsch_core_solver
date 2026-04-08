@@ -3,6 +3,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -20,6 +25,31 @@ const char *ch_preconditioner_name(ch_sparse_krylov::PreconditionerType type) {
     return "SparsePCG[ICC]";
   }
   return "SparsePCG[Diagonal]";
+}
+
+std::string shell_quote(const std::string &value) {
+  std::string quoted = "'";
+  for (char ch : value) {
+    if (ch == '\'') {
+      quoted += "'\\''";
+    } else {
+      quoted += ch;
+    }
+  }
+  quoted += "'";
+  return quoted;
+}
+
+void write_solver_vector_file(const std::filesystem::path &path, const std::vector<double> &values) {
+  std::ofstream out(path);
+  if (!out) {
+    throw std::runtime_error("cannot open solver vector file: " + path.string());
+  }
+  out << values.size() << "\n";
+  out << std::setprecision(17);
+  for (double value : values) {
+    out << value << "\n";
+  }
 }
 
 } // namespace
@@ -123,6 +153,18 @@ double Solver::phase_weno_y_face_value(const Field2D &c_state, const Field2D &v_
 }
 
 void Solver::update_surface_tension_force(const Field2D &c_old, const Field2D &c_new) {
+  if (cfg_.surface_tension_multiplier == 0.0) {
+    surface_fx_cell_.fill(0.0);
+    surface_fy_cell_.fill(0.0);
+    surface_fx_u_.fill(0.0);
+    surface_fy_v_.fill(0.0);
+    apply_scalar_bc(surface_fx_cell_);
+    apply_scalar_bc(surface_fy_cell_);
+    apply_u_bc(surface_fx_u_);
+    apply_v_bc(surface_fy_v_);
+    return;
+  }
+
   Field2D c_mid = c_new;
   for (int i = 0; i < cfg_.nx; ++i) {
     for (int j = 0; j < cfg_.ny; ++j) {
@@ -134,7 +176,7 @@ void Solver::update_surface_tension_force(const Field2D &c_old, const Field2D &c
   Field2D mu_mid(cfg_.nx, cfg_.ny, cfg_.ghost, 0.0);
   update_chemical_potential(c_mid, mu_mid);
 
-  const double scale = 1.0 / (cfg_.re * cfg_.ca);
+  const double scale = cfg_.surface_tension_multiplier / (cfg_.re * cfg_.ca);
   for (int i = 0; i < cfg_.nx; ++i) {
     for (int j = 0; j < cfg_.ny; ++j) {
       surface_fx_cell_(i, j) = scale * mu_mid(i, j) * grad_center_x(c_mid, i, j);
@@ -167,6 +209,33 @@ void Solver::update_surface_tension_force(const Field2D &c_old, const Field2D &c
   }
   apply_u_bc(surface_fx_u_);
   apply_v_bc(surface_fy_v_);
+
+  if (cfg_.surface_tension_smoothing_passes <= 0 || cfg_.surface_tension_smoothing_weight <= 0.0) {
+    return;
+  }
+
+  auto smooth_field = [&](Field2D &field, const auto &apply_bc) {
+    Field2D scratch(field.nx, field.ny, field.ghost, 0.0);
+    const double neighbor_weight = cfg_.surface_tension_smoothing_weight;
+    const double center_weight = 1.0 - 4.0 * neighbor_weight;
+    for (int pass = 0; pass < cfg_.surface_tension_smoothing_passes; ++pass) {
+      apply_bc(field);
+      for (int i = 0; i < field.nx; ++i) {
+        for (int j = 0; j < field.ny; ++j) {
+          scratch(i, j) = center_weight * field(i, j) +
+                          neighbor_weight *
+                              (field(i - 1, j) + field(i + 1, j) + field(i, j - 1) + field(i, j + 1));
+        }
+      }
+      apply_bc(scratch);
+      field = scratch;
+    }
+  };
+
+  smooth_field(surface_fx_cell_, [&](Field2D &field) { apply_scalar_bc(field); });
+  smooth_field(surface_fy_cell_, [&](Field2D &field) { apply_scalar_bc(field); });
+  smooth_field(surface_fx_u_, [&](Field2D &field) { apply_u_bc(field); });
+  smooth_field(surface_fy_v_, [&](Field2D &field) { apply_v_bc(field); });
 }
 
 void Solver::build_phase_advection_fluxes(const Field2D &c_state, const Field2D &u_adv, const Field2D &v_adv,
@@ -294,7 +363,7 @@ double Solver::solve_phase_advection_only(const Field2D &u_adv, const Field2D &v
   phase_advection_rhs_ = rhs_stage;
   for (int i = 0; i < cfg_.nx; ++i) {
     for (int j = 0; j < cfg_.ny; ++j) {
-      c1(i, j) = clamp_phase_debug(c0(i, j) + cfg_.dt * rhs_stage(i, j));
+      c1(i, j) = c0(i, j) + cfg_.dt * rhs_stage(i, j);
     }
   }
   apply_scalar_bc(c1);
@@ -303,7 +372,7 @@ double Solver::solve_phase_advection_only(const Field2D &u_adv, const Field2D &v
   for (int i = 0; i < cfg_.nx; ++i) {
     for (int j = 0; j < cfg_.ny; ++j) {
       const double predictor = c1(i, j) + cfg_.dt * rhs_stage(i, j);
-      c2(i, j) = clamp_phase_debug(0.75 * c0(i, j) + 0.25 * predictor);
+      c2(i, j) = 0.75 * c0(i, j) + 0.25 * predictor;
     }
   }
   apply_scalar_bc(c2);
@@ -312,7 +381,7 @@ double Solver::solve_phase_advection_only(const Field2D &u_adv, const Field2D &v
   for (int i = 0; i < cfg_.nx; ++i) {
     for (int j = 0; j < cfg_.ny; ++j) {
       const double predictor = c2(i, j) + cfg_.dt * rhs_stage(i, j);
-      c_(i, j) = clamp_phase_debug((1.0 / 3.0) * c0(i, j) + (2.0 / 3.0) * predictor);
+      c_(i, j) = (1.0 / 3.0) * c0(i, j) + (2.0 / 3.0) * predictor;
     }
   }
   apply_scalar_bc(c_);
@@ -324,6 +393,12 @@ double Solver::solve_phase_advection_only(const Field2D &u_adv, const Field2D &v
 void Solver::solve_phase_linear_system_eq25(const Field2D &rhs_field, double alpha0, double target_mean,
                                             Field2D &c_state, double &iterate_residual,
                                             double &equation_residual) const {
+  (void)target_mean;
+  if (cfg_.ch_solver == "petsc_pcg") {
+    solve_phase_linear_system_eq25_petsc(rhs_field, alpha0, target_mean, c_state, iterate_residual, equation_residual);
+    return;
+  }
+
   ensure_ch_linear_system(alpha0);
 
   const int n = cfg_.nx * cfg_.ny;
@@ -354,17 +429,10 @@ void Solver::solve_phase_linear_system_eq25(const Field2D &rhs_field, double alp
   }
   last_ch_iterations_ = report.iterations;
 
-  double current_mean = 0.0;
-  for (double value : x) {
-    current_mean += value;
-  }
-  current_mean /= static_cast<double>(n);
-  const double shift = target_mean - current_mean;
-
   for (int i = 0; i < cfg_.nx; ++i) {
     for (int j = 0; j < cfg_.ny; ++j) {
       const std::size_t row = static_cast<std::size_t>(row_index(i, j));
-      c_state(i, j) = clamp_phase_debug(x[row] + shift);
+      c_state(i, j) = x[row];
     }
   }
   apply_scalar_bc(c_state);
@@ -387,6 +455,168 @@ void Solver::solve_phase_linear_system_eq25(const Field2D &rhs_field, double alp
   }
 
   iterate_residual = report.iterate_residual;
+  equation_residual = std::sqrt(residual_sq / std::max(rhs_norm_sq, 1.0e-30));
+}
+
+void Solver::solve_phase_linear_system_eq25_petsc(const Field2D &rhs_field, double alpha0, double target_mean,
+                                                  Field2D &c_state, double &iterate_residual,
+                                                  double &equation_residual) const {
+  (void)target_mean;
+  namespace fs = std::filesystem;
+
+  ensure_ch_linear_system(alpha0);
+
+  const int n = cfg_.nx * cfg_.ny;
+  auto row_index = [this](int i, int j) { return i * cfg_.ny + j; };
+
+  std::vector<double> rhs(static_cast<std::size_t>(n), 0.0);
+  std::vector<double> x(static_cast<std::size_t>(n), 0.0);
+  for (int i = 0; i < cfg_.nx; ++i) {
+    for (int j = 0; j < cfg_.ny; ++j) {
+      const std::size_t row = static_cast<std::size_t>(row_index(i, j));
+      rhs[row] = rhs_field(i, j);
+      x[row] = c_state(i, j);
+    }
+  }
+
+  const fs::path solver_dir = ch_solver_dir();
+  fs::create_directories(solver_dir);
+  const fs::path matrix_path = solver_dir / "matrix_triplets.txt";
+  const fs::path rhs_path = solver_dir / "rhs.txt";
+  const fs::path guess_path = solver_dir / "initial_guess.txt";
+  const fs::path solution_path = solver_dir / "solution.txt";
+  const fs::path report_path = solver_dir / "report.txt";
+  const bool write_monitor_log =
+      cfg_.petsc_ch_log_every > 0 && ((current_step_index_ + 1) % cfg_.petsc_ch_log_every == 0);
+  std::ostringstream monitor_name;
+  monitor_name << "residual_step_" << std::setw(6) << std::setfill('0') << (current_step_index_ + 1) << ".log";
+  const fs::path monitor_log_path = solver_dir / monitor_name.str();
+
+  {
+    std::ofstream matrix_out(matrix_path);
+    if (!matrix_out) {
+      throw std::runtime_error("cannot open PETSc CH matrix file: " + matrix_path.string());
+    }
+    matrix_out << n << " " << n << " " << ch_linear_system_matrix_.values.size() << "\n";
+    matrix_out << std::setprecision(17);
+    for (int row = 0; row < ch_linear_system_matrix_.n; ++row) {
+      for (int pos = ch_linear_system_matrix_.row_ptr[static_cast<std::size_t>(row)];
+           pos < ch_linear_system_matrix_.row_ptr[static_cast<std::size_t>(row + 1)]; ++pos) {
+        matrix_out << row << " " << ch_linear_system_matrix_.col_idx[static_cast<std::size_t>(pos)] << " "
+                   << ch_linear_system_matrix_.values[static_cast<std::size_t>(pos)] << "\n";
+      }
+    }
+  }
+
+  write_solver_vector_file(rhs_path, rhs);
+  write_solver_vector_file(guess_path, x);
+
+  const fs::path script_path = cfg_.petsc_solver_script;
+  const fs::path options_path = cfg_.petsc_solver_config;
+  if (!fs::exists(script_path)) {
+    throw std::runtime_error("PETSc CH helper script not found: " + script_path.string());
+  }
+  if (!fs::exists(options_path)) {
+    throw std::runtime_error("PETSc CH options file not found: " + options_path.string());
+  }
+
+  std::ostringstream command;
+  if (const char *petsc_dir = std::getenv("PETSC_DIR")) {
+    if (*petsc_dir != '\0') {
+      command << "PETSC_DIR=" << petsc_dir << " ";
+    }
+  }
+  if (const char *petsc_arch = std::getenv("PETSC_ARCH")) {
+    if (*petsc_arch != '\0') {
+      command << "PETSC_ARCH=" << petsc_arch << " ";
+    }
+  }
+  command << shell_quote(cfg_.petsc_python_executable) << " " << shell_quote(script_path.string()) << " --matrix "
+          << shell_quote(matrix_path.string()) << " --rhs " << shell_quote(rhs_path.string()) << " --initial-guess "
+          << shell_quote(guess_path.string()) << " --solution " << shell_quote(solution_path.string()) << " --report "
+          << shell_quote(report_path.string()) << " --config " << shell_quote(options_path.string())
+          << " --use-constant-nullspace false";
+  if (cfg_.verbose) {
+    command << " --log-prefix \"[ch step " << (current_step_index_ + 1) << "]\"";
+  }
+  if (write_monitor_log) {
+    command << " --monitor-log " << shell_quote(monitor_log_path.string());
+  }
+
+  const int code = std::system(command.str().c_str());
+  if (code != 0) {
+    throw std::runtime_error("PETSc CH solve failed with exit code " + std::to_string(code));
+  }
+
+  {
+    std::ifstream solution_in(solution_path);
+    if (!solution_in) {
+      throw std::runtime_error("cannot open PETSc CH solution file: " + solution_path.string());
+    }
+    int read_n = 0;
+    solution_in >> read_n;
+    if (read_n != n) {
+      throw std::runtime_error("PETSc CH solution size mismatch");
+    }
+    for (int idx = 0; idx < n; ++idx) {
+      solution_in >> x[static_cast<std::size_t>(idx)];
+    }
+  }
+
+  iterate_residual = 0.0;
+  equation_residual = 0.0;
+  last_ch_solver_name_ = "PETSc[CG+ICC]";
+  {
+    std::ifstream report_in(report_path);
+    if (!report_in) {
+      throw std::runtime_error("cannot open PETSc CH report file: " + report_path.string());
+    }
+    std::string key;
+    std::string ksp_type;
+    std::string pc_type;
+    while (report_in >> key) {
+      if (key == "residual_norm") {
+        report_in >> iterate_residual;
+      } else if (key == "iterations") {
+        report_in >> last_ch_iterations_;
+      } else if (key == "ksp_type") {
+        report_in >> ksp_type;
+      } else if (key == "pc_type") {
+        report_in >> pc_type;
+      } else {
+        std::string value;
+        report_in >> value;
+      }
+    }
+    if (!ksp_type.empty() || !pc_type.empty()) {
+      last_ch_solver_name_ = "PETSc[" + ksp_type + "+" + pc_type + "]";
+    }
+  }
+
+  for (int i = 0; i < cfg_.nx; ++i) {
+    for (int j = 0; j < cfg_.ny; ++j) {
+      const std::size_t row = static_cast<std::size_t>(row_index(i, j));
+      c_state(i, j) = x[row];
+    }
+  }
+  apply_scalar_bc(c_state);
+
+  std::vector<double> corrected_x(static_cast<std::size_t>(n), 0.0);
+  double rhs_norm_sq = 0.0;
+  for (int i = 0; i < cfg_.nx; ++i) {
+    for (int j = 0; j < cfg_.ny; ++j) {
+      const std::size_t row = static_cast<std::size_t>(row_index(i, j));
+      corrected_x[row] = c_state(i, j);
+      rhs_norm_sq += square(rhs[row]);
+    }
+  }
+
+  std::vector<double> ax;
+  ch_sparse_krylov::apply_matrix(ch_linear_system_matrix_, corrected_x, ax);
+  double residual_sq = 0.0;
+  for (int idx = 0; idx < n; ++idx) {
+    residual_sq += square(rhs[static_cast<std::size_t>(idx)] - ax[static_cast<std::size_t>(idx)]);
+  }
   equation_residual = std::sqrt(residual_sq / std::max(rhs_norm_sq, 1.0e-30));
 }
 

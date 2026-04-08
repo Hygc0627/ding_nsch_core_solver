@@ -170,6 +170,8 @@ def main():
   parser.add_argument("--unsplit-name", required=True)
   parser.add_argument("--split-dir", required=True)
   parser.add_argument("--split-name", required=True)
+  parser.add_argument("--unsplit-label", default="unsplit")
+  parser.add_argument("--split-label", default="split")
   parser.add_argument("--steps", nargs="+", type=int, required=True)
   parser.add_argument("--dt", type=float, required=True)
   parser.add_argument("--output", required=True)
@@ -188,9 +190,9 @@ def main():
       '<rect width="100%" height="100%" fill="white"/>',
       f'<text x="{width/2:.1f}" y="30" text-anchor="middle" font-size="20">Rising bubble interface: split vs non-split pressure projection</text>',
       '<line x1="80" y1="52" x2="130" y2="52" stroke="#005f73" stroke-width="2.0"/>',
-      '<text x="140" y="57" font-size="13">icpcg</text>',
+      f'<text x="140" y="57" font-size="13">{args.unsplit_label}</text>',
       '<line x1="220" y1="52" x2="270" y2="52" stroke="#bb3e03" stroke-width="1.8" stroke-dasharray="6 4"/>',
-      '<text x="280" y="57" font-size="13">paper_split_icpcg</text>',
+      f'<text x="280" y="57" font-size="13">{args.split_label}</text>',
   ]
 
   for idx, step in enumerate(args.steps):

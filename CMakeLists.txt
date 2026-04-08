@@ -14,6 +14,7 @@ add_library(core_coupled
   src/core/coupled/phase_field.cpp
   src/core/coupled/momentum.cpp
   src/core/coupled/pressure.cpp
+  src/core/coupled/pressure_analysis.cpp
   src/core/coupled/diagnostics.cpp
   src/core/coupled/io.cpp
 )

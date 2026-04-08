@@ -1,0 +1,17 @@
+HYDEA_OPTIONS = {
+    "example_dir": "/home/weiyy/phaseField/dinghang/HyDEA/PetIBM/examples/navierstokesHyDEA/192cavity",
+    "schedule": "alternating",
+    "ksp_type": "cg",
+    "pc_type": "icc",
+    "pc_factor_shift_type": "positive_definite",
+    "pc_factor_shift_amount": 1.0e-12,
+    "norm_type": "unpreconditioned",
+    "rtol": 0.0,
+    "atol": 1.0e-6,
+    "max_it": 800,
+    "num_cg_iterations": 10,
+    "num_ml_iterations": 2,
+    "cuda": False,
+    "monitor": True,
+    "monitor_stdout": False,
+}

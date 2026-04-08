@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <map>
 #include <stdexcept>
 #include <vector>
@@ -42,6 +43,22 @@ struct LinearSolveReport {
   double relative_residual = 0.0;
   double iterate_residual = 0.0;
 };
+
+struct CGMonitorData {
+  int iteration = 0;
+  double alpha = 0.0;
+  double beta = 0.0;
+  double absolute_residual = 0.0;
+  double relative_residual = 0.0;
+  double iterate_residual = 0.0;
+  double preconditioned_residual = 0.0;
+  const std::vector<double> *x = nullptr;
+  const std::vector<double> *r = nullptr;
+  const std::vector<double> *z = nullptr;
+};
+
+using VectorProjection = std::function<void(std::vector<double> &)>;
+using CGMonitor = std::function<void(const CGMonitorData &)>;
 
 inline double square(double value) { return value * value; }
 
@@ -465,7 +482,9 @@ inline void apply_preconditioner(const SparseMatrixCSR &matrix, const KrylovPrec
 
 inline LinearSolveReport solve_preconditioned_cg(const SparseMatrixCSR &matrix, const KrylovPreconditioner &preconditioner,
                                                  const std::vector<double> &rhs, int max_iterations, double tolerance,
-                                                 std::vector<double> &x) {
+                                                 std::vector<double> &x,
+                                                 const VectorProjection &project_vector = {},
+                                                 const CGMonitor &monitor = {}) {
   if (matrix.n <= 0) {
     throw std::runtime_error("cannot solve an empty linear system");
   }
@@ -484,20 +503,48 @@ inline LinearSolveReport solve_preconditioned_cg(const SparseMatrixCSR &matrix, 
   for (int idx = 0; idx < matrix.n; ++idx) {
     r[static_cast<std::size_t>(idx)] = rhs[static_cast<std::size_t>(idx)] - ax[static_cast<std::size_t>(idx)];
   }
+  if (project_vector) {
+    project_vector(r);
+  }
 
   const double rhs_norm = std::sqrt(std::max(dot_product(rhs, rhs), 0.0));
   LinearSolveReport report;
   report.absolute_residual = std::sqrt(std::max(dot_product(r, r), 0.0));
   report.relative_residual = report.absolute_residual / std::max(rhs_norm, 1.0e-30);
   if (report.relative_residual < tolerance || report.absolute_residual < tolerance) {
+    if (monitor) {
+      CGMonitorData data;
+      data.iteration = 0;
+      data.absolute_residual = report.absolute_residual;
+      data.relative_residual = report.relative_residual;
+      data.iterate_residual = report.iterate_residual;
+      data.x = &x;
+      data.r = &r;
+      monitor(data);
+    }
     return report;
   }
 
   std::vector<double> z;
   apply_preconditioner(matrix, preconditioner, r, z);
+  if (project_vector) {
+    project_vector(z);
+  }
   double rz_old = dot_product(r, z);
   if (!std::isfinite(rz_old) || rz_old <= 0.0) {
     throw std::runtime_error("pcg preconditioner breakdown: non-positive r^T M^{-1} r");
+  }
+  if (monitor) {
+    CGMonitorData data;
+    data.iteration = 0;
+    data.absolute_residual = report.absolute_residual;
+    data.relative_residual = report.relative_residual;
+    data.iterate_residual = report.iterate_residual;
+    data.preconditioned_residual = std::sqrt(std::max(rz_old, 0.0));
+    data.x = &x;
+    data.r = &r;
+    data.z = &z;
+    monitor(data);
   }
 
   std::vector<double> p = z;
@@ -520,24 +567,59 @@ inline LinearSolveReport solve_preconditioned_cg(const SparseMatrixCSR &matrix, 
       update_sq += delta * delta;
       x_norm_sq += x[static_cast<std::size_t>(idx)] * x[static_cast<std::size_t>(idx)];
     }
+    if (project_vector) {
+      project_vector(x);
+      project_vector(r);
+    }
 
     report.iterations = iter + 1;
     report.iterate_residual = std::sqrt(update_sq / std::max(x_norm_sq, 1.0e-30));
     report.absolute_residual = std::sqrt(std::max(dot_product(r, r), 0.0));
     report.relative_residual = report.absolute_residual / std::max(rhs_norm, 1.0e-30);
     if (report.relative_residual < tolerance || report.absolute_residual < tolerance) {
+      if (monitor) {
+        CGMonitorData data;
+        data.iteration = iter + 1;
+        data.alpha = alpha;
+        data.absolute_residual = report.absolute_residual;
+        data.relative_residual = report.relative_residual;
+        data.iterate_residual = report.iterate_residual;
+        data.x = &x;
+        data.r = &r;
+        monitor(data);
+      }
       break;
     }
-
+    double beta = 0.0;
     apply_preconditioner(matrix, preconditioner, r, z);
+    if (project_vector) {
+      project_vector(z);
+    }
     const double rz_new = dot_product(r, z);
     if (!std::isfinite(rz_new) || rz_new <= 0.0) {
       throw std::runtime_error("pcg preconditioner breakdown: non-positive new r^T M^{-1} r");
     }
 
-    const double beta = rz_new / rz_old;
+    beta = rz_new / rz_old;
+    if (monitor) {
+      CGMonitorData data;
+      data.iteration = iter + 1;
+      data.alpha = alpha;
+      data.beta = beta;
+      data.absolute_residual = report.absolute_residual;
+      data.relative_residual = report.relative_residual;
+      data.iterate_residual = report.iterate_residual;
+      data.preconditioned_residual = std::sqrt(std::max(rz_new, 0.0));
+      data.x = &x;
+      data.r = &r;
+      data.z = &z;
+      monitor(data);
+    }
     for (int idx = 0; idx < matrix.n; ++idx) {
       p[static_cast<std::size_t>(idx)] = z[static_cast<std::size_t>(idx)] + beta * p[static_cast<std::size_t>(idx)];
+    }
+    if (project_vector) {
+      project_vector(p);
     }
     rz_old = rz_new;
   }

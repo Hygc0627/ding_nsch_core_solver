@@ -255,6 +255,8 @@ def main():
   parser.add_argument("--unsplit-name", required=True)
   parser.add_argument("--split-dir", required=True)
   parser.add_argument("--split-name", required=True)
+  parser.add_argument("--unsplit-label", default="unsplit")
+  parser.add_argument("--split-label", default="split")
   parser.add_argument("--dt", type=float, required=True)
   parser.add_argument("--output-dir", required=True)
   args = parser.parse_args()
@@ -279,7 +281,14 @@ def main():
       writer.writerow({"case": "split_icpcg", **row})
 
   svg_path = os.path.join(args.output_dir, "rising_bubble_split_vs_unsplit.svg")
+  # Patch labels in the generated SVG by reusing the existing writer and then replacing
+  # the fixed legend strings with user-provided labels.
   write_svg(svg_path, unsplit_centroids, split_centroids, unsplit_history, split_history)
+  text = open(svg_path, "r", encoding="utf-8").read()
+  text = text.replace("icpcg (non-split)", args.unsplit_label)
+  text = text.replace("paper_split_icpcg", args.split_label)
+  with open(svg_path, "w", encoding="utf-8") as handle:
+    handle.write(text)
 
   print(f"COMPARE_OK summary={summary_csv} centroids={centroid_csv} svg={svg_path}")
 

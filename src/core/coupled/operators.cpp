@@ -8,6 +8,125 @@ namespace ding {
 
 using coupled_detail::square;
 
+void Solver::validate_boundary_configuration() const {
+  auto require_no_explicit_bc = [&](const BoundaryConditionSpec &bc, const char *name) {
+    if (bc.type != BoundaryConditionType::unset) {
+      throw std::runtime_error(std::string(name) + " cannot be set when the direction is periodic");
+    }
+  };
+
+  if (cfg_.periodic_x) {
+    require_no_explicit_bc(cfg_.pressure_bc_left, "pressure_bc_left");
+    require_no_explicit_bc(cfg_.pressure_bc_right, "pressure_bc_right");
+    require_no_explicit_bc(cfg_.u_bc_left, "u_bc_left");
+    require_no_explicit_bc(cfg_.u_bc_right, "u_bc_right");
+    require_no_explicit_bc(cfg_.v_bc_left, "v_bc_left");
+    require_no_explicit_bc(cfg_.v_bc_right, "v_bc_right");
+  }
+  if (cfg_.periodic_y) {
+    require_no_explicit_bc(cfg_.pressure_bc_bottom, "pressure_bc_bottom");
+    require_no_explicit_bc(cfg_.pressure_bc_top, "pressure_bc_top");
+    require_no_explicit_bc(cfg_.u_bc_bottom, "u_bc_bottom");
+    require_no_explicit_bc(cfg_.u_bc_top, "u_bc_top");
+    require_no_explicit_bc(cfg_.v_bc_bottom, "v_bc_bottom");
+    require_no_explicit_bc(cfg_.v_bc_top, "v_bc_top");
+  }
+}
+
+BoundaryConditionSpec Solver::effective_pressure_bc(BoundarySide side) const {
+  switch (side) {
+  case BoundarySide::left:
+    if (cfg_.pressure_bc_left.type != BoundaryConditionType::unset) {
+      return cfg_.pressure_bc_left;
+    }
+    break;
+  case BoundarySide::right:
+    if (cfg_.pressure_bc_right.type != BoundaryConditionType::unset) {
+      return cfg_.pressure_bc_right;
+    }
+    break;
+  case BoundarySide::bottom:
+    if (cfg_.pressure_bc_bottom.type != BoundaryConditionType::unset) {
+      return cfg_.pressure_bc_bottom;
+    }
+    break;
+  case BoundarySide::top:
+    if (cfg_.pressure_bc_top.type != BoundaryConditionType::unset) {
+      return cfg_.pressure_bc_top;
+    }
+    break;
+  }
+  return {BoundaryConditionType::neumann, 0.0};
+}
+
+BoundaryConditionSpec Solver::effective_u_bc(BoundarySide side) const {
+  switch (side) {
+  case BoundarySide::left:
+    if (cfg_.u_bc_left.type != BoundaryConditionType::unset) {
+      return cfg_.u_bc_left;
+    }
+    return {BoundaryConditionType::dirichlet, 0.0};
+  case BoundarySide::right:
+    if (cfg_.u_bc_right.type != BoundaryConditionType::unset) {
+      return cfg_.u_bc_right;
+    }
+    return {BoundaryConditionType::dirichlet, 0.0};
+  case BoundarySide::bottom:
+    if (cfg_.u_bc_bottom.type != BoundaryConditionType::unset) {
+      return cfg_.u_bc_bottom;
+    }
+    return {BoundaryConditionType::dirichlet, cfg_.bottom_wall_velocity_x};
+  case BoundarySide::top:
+    if (cfg_.u_bc_top.type != BoundaryConditionType::unset) {
+      return cfg_.u_bc_top;
+    }
+    return {BoundaryConditionType::dirichlet, cfg_.top_wall_velocity_x};
+  }
+  return {BoundaryConditionType::dirichlet, 0.0};
+}
+
+BoundaryConditionSpec Solver::effective_v_bc(BoundarySide side) const {
+  switch (side) {
+  case BoundarySide::left:
+    if (cfg_.v_bc_left.type != BoundaryConditionType::unset) {
+      return cfg_.v_bc_left;
+    }
+    break;
+  case BoundarySide::right:
+    if (cfg_.v_bc_right.type != BoundaryConditionType::unset) {
+      return cfg_.v_bc_right;
+    }
+    break;
+  case BoundarySide::bottom:
+    if (cfg_.v_bc_bottom.type != BoundaryConditionType::unset) {
+      return cfg_.v_bc_bottom;
+    }
+    break;
+  case BoundarySide::top:
+    if (cfg_.v_bc_top.type != BoundaryConditionType::unset) {
+      return cfg_.v_bc_top;
+    }
+    break;
+  }
+  return {BoundaryConditionType::dirichlet, 0.0};
+}
+
+bool Solver::pressure_has_dirichlet_boundary() const {
+  if (!cfg_.periodic_x) {
+    if (effective_pressure_bc(BoundarySide::left).type == BoundaryConditionType::dirichlet ||
+        effective_pressure_bc(BoundarySide::right).type == BoundaryConditionType::dirichlet) {
+      return true;
+    }
+  }
+  if (!cfg_.periodic_y) {
+    if (effective_pressure_bc(BoundarySide::bottom).type == BoundaryConditionType::dirichlet ||
+        effective_pressure_bc(BoundarySide::top).type == BoundaryConditionType::dirichlet) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void Solver::apply_scalar_bc(Field2D &field) const {
   for (int g = 1; g <= field.ghost; ++g) {
     for (int j = 0; j < field.ny; ++j) {
@@ -21,58 +140,150 @@ void Solver::apply_scalar_bc(Field2D &field) const {
   }
 }
 
+void Solver::apply_pressure_bc(Field2D &field) const {
+  const BoundaryConditionSpec left_bc = effective_pressure_bc(BoundarySide::left);
+  const BoundaryConditionSpec right_bc = effective_pressure_bc(BoundarySide::right);
+  const BoundaryConditionSpec bottom_bc = effective_pressure_bc(BoundarySide::bottom);
+  const BoundaryConditionSpec top_bc = effective_pressure_bc(BoundarySide::top);
+
+  for (int g = 1; g <= field.ghost; ++g) {
+    for (int j = 0; j < field.ny; ++j) {
+      if (cfg_.periodic_x) {
+        field(-g, j) = field(field.nx - g, j);
+        field(field.nx - 1 + g, j) = field(g - 1, j);
+      } else {
+        const double left_offset = 2.0 * (static_cast<double>(g) - 0.5) * left_bc.value * dx_;
+        const double right_offset = 2.0 * (static_cast<double>(g) - 0.5) * right_bc.value * dx_;
+        field(-g, j) = (left_bc.type == BoundaryConditionType::dirichlet)
+                           ? 2.0 * left_bc.value - field(g - 1, j)
+                           : field(g - 1, j) + left_offset;
+        field(field.nx - 1 + g, j) = (right_bc.type == BoundaryConditionType::dirichlet)
+                                         ? 2.0 * right_bc.value - field(field.nx - g, j)
+                                         : field(field.nx - g, j) + right_offset;
+      }
+    }
+    for (int i = -field.ghost; i < field.nx + field.ghost; ++i) {
+      if (cfg_.periodic_y) {
+        field(i, -g) = field(i, field.ny - g);
+        field(i, field.ny - 1 + g) = field(i, g - 1);
+      } else {
+        const double bottom_offset = 2.0 * (static_cast<double>(g) - 0.5) * bottom_bc.value * dy_;
+        const double top_offset = 2.0 * (static_cast<double>(g) - 0.5) * top_bc.value * dy_;
+        field(i, -g) = (bottom_bc.type == BoundaryConditionType::dirichlet)
+                           ? 2.0 * bottom_bc.value - field(i, g - 1)
+                           : field(i, g - 1) + bottom_offset;
+        field(i, field.ny - 1 + g) = (top_bc.type == BoundaryConditionType::dirichlet)
+                                         ? 2.0 * top_bc.value - field(i, field.ny - g)
+                                         : field(i, field.ny - g) + top_offset;
+      }
+    }
+  }
+}
+
 void Solver::apply_u_bc(Field2D &field) const {
+  const BoundaryConditionSpec left_bc = effective_u_bc(BoundarySide::left);
+  const BoundaryConditionSpec right_bc = effective_u_bc(BoundarySide::right);
+  const BoundaryConditionSpec bottom_bc = effective_u_bc(BoundarySide::bottom);
+  const BoundaryConditionSpec top_bc = effective_u_bc(BoundarySide::top);
+
   if (cfg_.periodic_x) {
     for (int j = 0; j < field.ny; ++j) {
       field(field.nx - 1, j) = field(0, j);
     }
+  } else {
+    for (int j = 0; j < field.ny; ++j) {
+      field(0, j) = (left_bc.type == BoundaryConditionType::dirichlet) ? left_bc.value : field(1, j) + left_bc.value * dx_;
+      field(field.nx - 1, j) = (right_bc.type == BoundaryConditionType::dirichlet)
+                                   ? right_bc.value
+                                   : field(field.nx - 2, j) + right_bc.value * dx_;
+    }
   }
   for (int g = 1; g <= field.ghost; ++g) {
     for (int j = 0; j < field.ny; ++j) {
-      field(-g, j) = cfg_.periodic_x ? field(field.nx - g - 1, j) : 0.0;
-      field(field.nx - 1 + g, j) = cfg_.periodic_x ? field(g, j) : 0.0;
+      if (cfg_.periodic_x) {
+        field(-g, j) = field(field.nx - g - 1, j);
+        field(field.nx - 1 + g, j) = field(g, j);
+      } else {
+        const double left_offset = 2.0 * static_cast<double>(g) * left_bc.value * dx_;
+        const double right_offset = 2.0 * static_cast<double>(g) * right_bc.value * dx_;
+        field(-g, j) = (left_bc.type == BoundaryConditionType::dirichlet)
+                           ? 2.0 * left_bc.value - field(g, j)
+                           : field(g, j) + left_offset;
+        field(field.nx - 1 + g, j) = (right_bc.type == BoundaryConditionType::dirichlet)
+                                         ? 2.0 * right_bc.value - field(field.nx - 1 - g, j)
+                                         : field(field.nx - 1 - g, j) + right_offset;
+      }
     }
     for (int i = -field.ghost; i < field.nx + field.ghost; ++i) {
-      field(i, -g) = cfg_.periodic_y ? field(i, field.ny - g) : -field(i, g - 1);
-      field(i, field.ny - 1 + g) = cfg_.periodic_y ? field(i, g - 1) : -field(i, field.ny - g);
+      if (cfg_.periodic_y) {
+        field(i, -g) = field(i, field.ny - g);
+        field(i, field.ny - 1 + g) = field(i, g - 1);
+      } else {
+        const double bottom_offset = 2.0 * (static_cast<double>(g) - 0.5) * bottom_bc.value * dy_;
+        const double top_offset = 2.0 * (static_cast<double>(g) - 0.5) * top_bc.value * dy_;
+        field(i, -g) = (bottom_bc.type == BoundaryConditionType::dirichlet)
+                           ? 2.0 * bottom_bc.value - field(i, g - 1)
+                           : field(i, g - 1) + bottom_offset;
+        field(i, field.ny - 1 + g) = (top_bc.type == BoundaryConditionType::dirichlet)
+                                         ? 2.0 * top_bc.value - field(i, field.ny - g)
+                                         : field(i, field.ny - g) + top_offset;
+      }
     }
   }
 }
 
 void Solver::apply_u_velocity_bc(Field2D &field) const {
   apply_u_bc(field);
-  if (cfg_.periodic_y) {
-    return;
-  }
-
-  const double bottom_wall = cfg_.bottom_wall_velocity_x;
-  const double top_wall = cfg_.top_wall_velocity_x;
-  if (std::abs(bottom_wall) <= 0.0 && std::abs(top_wall) <= 0.0) {
-    return;
-  }
-
-  for (int g = 1; g <= field.ghost; ++g) {
-    for (int i = -field.ghost; i < field.nx + field.ghost; ++i) {
-      field(i, -g) = 2.0 * bottom_wall - field(i, g - 1);
-      field(i, field.ny - 1 + g) = 2.0 * top_wall - field(i, field.ny - g);
-    }
-  }
 }
 
 void Solver::apply_v_bc(Field2D &field) const {
+  const BoundaryConditionSpec left_bc = effective_v_bc(BoundarySide::left);
+  const BoundaryConditionSpec right_bc = effective_v_bc(BoundarySide::right);
+  const BoundaryConditionSpec bottom_bc = effective_v_bc(BoundarySide::bottom);
+  const BoundaryConditionSpec top_bc = effective_v_bc(BoundarySide::top);
+
   if (cfg_.periodic_y) {
     for (int i = 0; i < field.nx; ++i) {
       field(i, field.ny - 1) = field(i, 0);
     }
+  } else {
+    for (int i = 0; i < field.nx; ++i) {
+      field(i, 0) = (bottom_bc.type == BoundaryConditionType::dirichlet) ? bottom_bc.value : field(i, 1) + bottom_bc.value * dy_;
+      field(i, field.ny - 1) = (top_bc.type == BoundaryConditionType::dirichlet)
+                                   ? top_bc.value
+                                   : field(i, field.ny - 2) + top_bc.value * dy_;
+    }
   }
   for (int g = 1; g <= field.ghost; ++g) {
     for (int j = 0; j < field.ny; ++j) {
-      field(-g, j) = cfg_.periodic_x ? field(field.nx - g, j) : -field(g - 1, j);
-      field(field.nx - 1 + g, j) = cfg_.periodic_x ? field(g - 1, j) : -field(field.nx - g, j);
+      if (cfg_.periodic_x) {
+        field(-g, j) = field(field.nx - g, j);
+        field(field.nx - 1 + g, j) = field(g - 1, j);
+      } else {
+        const double left_offset = 2.0 * (static_cast<double>(g) - 0.5) * left_bc.value * dx_;
+        const double right_offset = 2.0 * (static_cast<double>(g) - 0.5) * right_bc.value * dx_;
+        field(-g, j) = (left_bc.type == BoundaryConditionType::dirichlet)
+                           ? 2.0 * left_bc.value - field(g - 1, j)
+                           : field(g - 1, j) + left_offset;
+        field(field.nx - 1 + g, j) = (right_bc.type == BoundaryConditionType::dirichlet)
+                                         ? 2.0 * right_bc.value - field(field.nx - g, j)
+                                         : field(field.nx - g, j) + right_offset;
+      }
     }
     for (int i = -field.ghost; i < field.nx + field.ghost; ++i) {
-      field(i, -g) = cfg_.periodic_y ? field(i, field.ny - g - 1) : 0.0;
-      field(i, field.ny - 1 + g) = cfg_.periodic_y ? field(i, g) : 0.0;
+      if (cfg_.periodic_y) {
+        field(i, -g) = field(i, field.ny - g - 1);
+        field(i, field.ny - 1 + g) = field(i, g);
+      } else {
+        const double bottom_offset = 2.0 * static_cast<double>(g) * bottom_bc.value * dy_;
+        const double top_offset = 2.0 * static_cast<double>(g) * top_bc.value * dy_;
+        field(i, -g) = (bottom_bc.type == BoundaryConditionType::dirichlet)
+                           ? 2.0 * bottom_bc.value - field(i, g)
+                           : field(i, g) + bottom_offset;
+        field(i, field.ny - 1 + g) = (top_bc.type == BoundaryConditionType::dirichlet)
+                                         ? 2.0 * top_bc.value - field(i, field.ny - 1 - g)
+                                         : field(i, field.ny - 1 - g) + top_offset;
+      }
     }
   }
 }
@@ -179,23 +390,20 @@ double Solver::divergence_cell(const Field2D &u_state, const Field2D &v_state, i
 }
 
 double Solver::pressure_gradient_u_face(const Field2D &pressure_like, int i, int j) const {
-  if (!cfg_.periodic_x && (i <= 0 || i >= cfg_.nx)) {
-    return 0.0;
-  }
   return (pressure_like(i, j) - pressure_like(i - 1, j)) / dx_;
 }
 
 double Solver::pressure_gradient_v_face(const Field2D &pressure_like, int i, int j) const {
-  if (!cfg_.periodic_y && (j <= 0 || j >= cfg_.ny)) {
-    return 0.0;
-  }
   return (pressure_like(i, j) - pressure_like(i, j - 1)) / dy_;
 }
 
 bool Solver::use_liu_pressure_split() const {
   return cfg_.pressure_scheme == "liu_split_icpcg" || cfg_.pressure_scheme == "split_icpcg" ||
          cfg_.pressure_scheme == "paper_split_icpcg" || cfg_.pressure_scheme == "liu_split_ildlt_pcg" ||
-         cfg_.pressure_scheme == "split_ildlt_pcg" || cfg_.pressure_scheme == "paper_split_ildlt_pcg";
+         cfg_.pressure_scheme == "split_ildlt_pcg" || cfg_.pressure_scheme == "paper_split_ildlt_pcg" ||
+         cfg_.pressure_scheme == "split_petsc_pcg" || cfg_.pressure_scheme == "paper_split_petsc_pcg" ||
+         cfg_.pressure_scheme == "liu_split_petsc_pcg" || cfg_.pressure_scheme == "split_hydea" ||
+         cfg_.pressure_scheme == "paper_split_hydea" || cfg_.pressure_scheme == "liu_split_hydea";
 }
 
 double Solver::liu_split_reference_density() const { return std::min(1.0, cfg_.density_ratio); }
@@ -208,7 +416,7 @@ void Solver::build_liu_split_pressure_extrapolation(Field2D &pressure_extrapolat
                                         : (2.0 * pressure_(i, j) - pressure_previous_step_(i, j));
     }
   }
-  apply_scalar_bc(pressure_extrapolated);
+  apply_pressure_bc(pressure_extrapolated);
 }
 
 double Solver::liu_split_explicit_divergence(const Field2D &pressure_extrapolated, int i, int j) const {
@@ -279,37 +487,29 @@ void Solver::apply_pressure_velocity_correction() {
 
   for (int i = 0; i < u_.nx; ++i) {
     for (int j = 0; j < u_.ny; ++j) {
-      if (!cfg_.periodic_x && (i == 0 || i == cfg_.nx)) {
-        u_(i, j) = 0.0;
-      } else {
-        // Liu et al. (2021), Eq. (26):
-        // u^{n+1} = u* - dt [ (1/rho_ref) grad(p^{n+1/2}) + (1/rho_mid - 1/rho_ref) grad(p_ext) ]
-        const double split_explicit = liu_split
-                                          ? (1.0 / rho_u_face(rho_mid_, i, j) - 1.0 / rho_ref) *
-                                                pressure_gradient_u_face(pressure_extrapolated, i, j)
-                                          : 0.0;
-        const double split_implicit =
-            liu_split ? pressure_gradient_u_face(pressure_correction_, i, j) / rho_ref
-                      : pressure_gradient_u_face(pressure_correction_, i, j) / rho_u_face(rho_mid_, i, j);
-        u_(i, j) = u_star_(i, j) - cfg_.dt * (split_implicit + split_explicit);
-      }
+      // Liu et al. (2021), Eq. (26):
+      // u^{n+1} = u* - dt [ (1/rho_ref) grad(p^{n+1/2}) + (1/rho_mid - 1/rho_ref) grad(p_ext) ]
+      const double split_explicit = liu_split
+                                        ? (1.0 / rho_u_face(rho_mid_, i, j) - 1.0 / rho_ref) *
+                                              pressure_gradient_u_face(pressure_extrapolated, i, j)
+                                        : 0.0;
+      const double split_implicit =
+          liu_split ? pressure_gradient_u_face(pressure_correction_, i, j) / rho_ref
+                    : pressure_gradient_u_face(pressure_correction_, i, j) / rho_u_face(rho_mid_, i, j);
+      u_(i, j) = u_star_(i, j) - cfg_.dt * (split_implicit + split_explicit);
     }
   }
 
   for (int i = 0; i < v_.nx; ++i) {
     for (int j = 0; j < v_.ny; ++j) {
-      if (!cfg_.periodic_y && (j == 0 || j == cfg_.ny)) {
-        v_(i, j) = 0.0;
-      } else {
-        const double split_explicit = liu_split
-                                          ? (1.0 / rho_v_face(rho_mid_, i, j) - 1.0 / rho_ref) *
-                                                pressure_gradient_v_face(pressure_extrapolated, i, j)
-                                          : 0.0;
-        const double split_implicit =
-            liu_split ? pressure_gradient_v_face(pressure_correction_, i, j) / rho_ref
-                      : pressure_gradient_v_face(pressure_correction_, i, j) / rho_v_face(rho_mid_, i, j);
-        v_(i, j) = v_star_(i, j) - cfg_.dt * (split_implicit + split_explicit);
-      }
+      const double split_explicit = liu_split
+                                        ? (1.0 / rho_v_face(rho_mid_, i, j) - 1.0 / rho_ref) *
+                                              pressure_gradient_v_face(pressure_extrapolated, i, j)
+                                        : 0.0;
+      const double split_implicit =
+          liu_split ? pressure_gradient_v_face(pressure_correction_, i, j) / rho_ref
+                    : pressure_gradient_v_face(pressure_correction_, i, j) / rho_v_face(rho_mid_, i, j);
+      v_(i, j) = v_star_(i, j) - cfg_.dt * (split_implicit + split_explicit);
     }
   }
   apply_u_velocity_bc(u_);
@@ -325,8 +525,10 @@ void Solver::apply_pressure_velocity_correction() {
       pressure_(i, j) = pressure_correction_(i, j);
     }
   }
-  subtract_mean(pressure_);
-  apply_scalar_bc(pressure_);
+  if (!pressure_has_dirichlet_boundary()) {
+    subtract_mean(pressure_);
+  }
+  apply_pressure_bc(pressure_);
 }
 
 double Solver::field_diff_l2(const Field2D &a, const Field2D &b, int i_begin, int i_end, int j_begin, int j_end) const {

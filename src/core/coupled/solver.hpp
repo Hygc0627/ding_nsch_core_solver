@@ -7,10 +7,42 @@
 #include "core/linear_algebra/ch_sparse_krylov.hpp"
 
 #include <fstream>
+#include <cstdio>
+#include <map>
 #include <string>
+#include <sys/types.h>
 #include <vector>
 
 namespace ding {
+
+struct PressureLinearSystem {
+  std::vector<std::map<int, double>> row_maps;
+  std::vector<double> rhs;
+  double max_diag = 0.0;
+  bool use_split = false;
+  double rho_ref = 1.0;
+  bool has_dirichlet_boundary = false;
+};
+
+struct PressureAnalysisSnapshot {
+  Field2D phase;
+  Field2D rho_mid;
+  Field2D u_star;
+  Field2D v_star;
+  Field2D pressure;
+  Field2D pressure_previous;
+  int step = 0;
+  double time = 0.0;
+  std::string source_mode;
+
+  PressureAnalysisSnapshot(int nx, int ny, int ghost)
+      : phase(nx, ny, ghost, 0.0),
+        rho_mid(nx, ny, ghost, 1.0),
+        u_star(nx + 1, ny, ghost, 0.0),
+        v_star(nx, ny + 1, ghost, 0.0),
+        pressure(nx, ny, ghost, 0.0),
+        pressure_previous(nx, ny, ghost, 0.0) {}
+};
 
 class Solver {
 public:
@@ -78,18 +110,32 @@ private:
   mutable double ch_cached_alpha0_ = -1.0;
   mutable ch_sparse_krylov::SparseMatrixCSR ch_linear_system_matrix_;
   mutable ch_sparse_krylov::KrylovPreconditioner ch_linear_system_preconditioner_;
+  pid_t petsc_pressure_worker_pid_ = -1;
+  FILE *petsc_pressure_worker_in_ = nullptr;
+  FILE *petsc_pressure_worker_out_ = nullptr;
+  std::string petsc_pressure_worker_matrix_path_;
+  std::string petsc_pressure_worker_options_path_;
+  bool petsc_pressure_worker_use_constant_nullspace_ = false;
 
+  bool is_advection_only_mode() const;
+  bool is_single_phase_mode() const;
   void initialize_phase();
   void initialize_velocity();
   void initialize_zalesak_disk();
   void fill_solid_body_rotation_velocity(Field2D &u_state, Field2D &v_state) const;
   void ensure_ch_operator_matrices() const;
   void ensure_ch_linear_system(double alpha0) const;
+  void validate_boundary_configuration() const;
 
   void apply_scalar_bc(Field2D &field) const;
+  void apply_pressure_bc(Field2D &field) const;
   void apply_u_bc(Field2D &field) const;
   void apply_u_velocity_bc(Field2D &field) const;
   void apply_v_bc(Field2D &field) const;
+  BoundaryConditionSpec effective_pressure_bc(BoundarySide side) const;
+  BoundaryConditionSpec effective_u_bc(BoundarySide side) const;
+  BoundaryConditionSpec effective_v_bc(BoundarySide side) const;
+  bool pressure_has_dirichlet_boundary() const;
 
   void update_materials();
   void update_materials_from_phase(const Field2D &c_state, Field2D &rho_state, Field2D &eta_state) const;
@@ -108,6 +154,9 @@ private:
                                      Field2D &explicit_operator) const;
   void solve_phase_linear_system_eq25(const Field2D &rhs_field, double alpha0, double target_mean, Field2D &c_state,
                                       double &iterate_residual, double &equation_residual) const;
+  void solve_phase_linear_system_eq25_petsc(const Field2D &rhs_field, double alpha0, double target_mean,
+                                            Field2D &c_state, double &iterate_residual,
+                                            double &equation_residual) const;
   void compute_momentum_fluxes(Field2D &u_adv, Field2D &v_adv) const;
   double solve_momentum_predictor(const Field2D &u_adv, const Field2D &v_adv, int step);
   double solve_pressure_correction();
@@ -129,6 +178,7 @@ private:
   std::string case_output_dir() const;
   std::string case_log_path() const;
   std::string history_csv_path() const;
+  std::string ch_solver_dir() const;
   std::string pressure_solver_dir() const;
   std::string restart_snapshot_path() const;
   void open_case_log();
@@ -195,10 +245,32 @@ private:
   double solve_pressure_correction_liu_split_ildlt_pcg();
   double solve_pressure_correction_petsc();
   double solve_pressure_correction_hydea();
+  bool can_reuse_petsc_pressure_matrix(bool use_split) const;
+  void start_petsc_pressure_worker(const std::string &matrix_path, const std::string &options_path,
+                                   bool use_constant_nullspace);
+  void stop_petsc_pressure_worker();
+  void solve_pressure_correction_petsc_via_worker(const std::string &rhs_path, const std::string &solution_path,
+                                                  const std::string &report_path, const std::string &monitor_log_path,
+                                                  const std::string &log_prefix);
   bool use_liu_pressure_split() const;
   double liu_split_reference_density() const;
   void build_liu_split_pressure_extrapolation(Field2D &pressure_extrapolated) const;
   double liu_split_explicit_divergence(const Field2D &pressure_extrapolated, int i, int j) const;
+  void build_pressure_linear_system(std::vector<std::map<int, double>> &row_maps, std::vector<double> &rhs,
+                                    double &max_diag, bool use_split, double rho_ref,
+                                    const Field2D *pressure_extrapolated) const;
+  void regularize_pressure_linear_system(std::vector<std::map<int, double>> &row_maps, std::vector<double> &rhs,
+                                         double max_diag) const;
+  void scatter_pressure_solution(const std::vector<double> &x);
+  PressureLinearSystem assemble_pressure_linear_system(bool use_split, double rho_ref,
+                                                       const Field2D *pressure_extrapolated) const;
+  ch_sparse_krylov::VectorProjection pressure_nullspace_projection() const;
+  std::vector<int> analysis_key_iterations() const;
+  bool analysis_mode_enabled(const std::string &mode_name) const;
+  std::string pressure_analysis_dir() const;
+  PressureAnalysisSnapshot make_pressure_analysis_snapshot(const std::string &source_mode) const;
+  void run_pressure_analysis_from_snapshot(const PressureAnalysisSnapshot &snapshot) const;
+  void maybe_run_pressure_analysis_frozen() const;
 };
 
 } // namespace ding

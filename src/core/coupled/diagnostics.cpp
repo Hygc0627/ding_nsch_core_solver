@@ -61,7 +61,7 @@ void Solver::populate_timestep_limits(Diagnostics &diag) const {
 
   diag.dt_limit_capillary = std::numeric_limits<double>::infinity();
   diag.dt_limit_ch_explicit = std::numeric_limits<double>::infinity();
-  if (cfg_.mode != "advection_only") {
+  if (!is_advection_only_mode() && !is_single_phase_mode()) {
     const double rho_scale = std::max(diag.rho_max, kTiny);
     diag.dt_limit_capillary =
         kCapillarySafety * std::sqrt(std::max(cfg_.re * cfg_.ca * h * h * h / rho_scale, 0.0));
@@ -79,14 +79,17 @@ void Solver::populate_timestep_limits(Diagnostics &diag) const {
     }
 
     if (mobility_max > kTiny) {
+      // Ding et al. (2007) use the split semi-implicit CH discretization of their
+      // Eq. (25), specifically to remove the explicit timestep restriction from the
+      // fourth-order diffusion term. For a paper-consistent diagnostic, do not treat
+      // the biharmonic stiffness as an explicit h^4-limited process here.
+      //
+      // The remaining explicit stiffness comes primarily from the local bulk-energy
+      // curvature in the nonlinear mobility-weighted term A(C,u), which behaves like
+      // a second-order diffusion with coefficient ~ alpha * M * W'' / (Pe * Cn).
       const double coeff_lap = alpha * mobility_max * max_abs_wpp / std::max(cfg_.pe * cfg_.cn, kTiny);
-      const double coeff_biharm = alpha * mobility_max * cfg_.cn / std::max(cfg_.pe, kTiny);
-      const double dt_lap =
+      diag.dt_limit_ch_explicit =
           coeff_lap > kTiny ? kChExplicitSafety * h * h / coeff_lap : std::numeric_limits<double>::infinity();
-      const double dt_biharm = coeff_biharm > kTiny
-                                   ? kChExplicitSafety * h * h * h * h / coeff_biharm
-                                   : std::numeric_limits<double>::infinity();
-      diag.dt_limit_ch_explicit = std::min(dt_lap, dt_biharm);
     }
   }
 

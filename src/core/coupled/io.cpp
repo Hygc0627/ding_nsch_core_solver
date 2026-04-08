@@ -121,6 +121,11 @@ std::string Solver::history_csv_path() const {
   return (fs::path(case_output_dir()) / "history.csv").string();
 }
 
+std::string Solver::ch_solver_dir() const {
+  namespace fs = std::filesystem;
+  return (fs::path(case_output_dir()) / "ch_solver").string();
+}
+
 std::string Solver::pressure_solver_dir() const {
   namespace fs = std::filesystem;
   return (fs::path(case_output_dir()) / "pressure_solver").string();
@@ -221,6 +226,7 @@ void Solver::log_run_header() {
   out.str("");
   out.clear();
   out << "SOLVERS ch=SparsePCG pressure=" << cfg_.pressure_scheme
+      << " ch_backend=" << cfg_.ch_solver
       << " momentum=ExplicitConvection+MonolithicImplicitViscosityBiCGSTAB"
       << " momentum_advection=" << cfg_.momentum_advection_scheme;
   log_message(out.str());
@@ -274,7 +280,7 @@ void Solver::write_restart_snapshot(int step) const {
   }
 
   write_binary_string(out, std::string(kRestartMagic));
-  write_binary_value(out, static_cast<std::uint32_t>(1));
+  write_binary_value(out, static_cast<std::uint32_t>(2));
   write_binary_value(out, step);
   write_binary_value(out, initial_mass_);
   write_binary_string(out, cfg_.mode);
@@ -296,6 +302,22 @@ void Solver::write_restart_snapshot(int step) const {
   write_binary_value(out, cfg_.bottom_wall_velocity_x);
   write_binary_value(out, static_cast<int>(cfg_.periodic_x));
   write_binary_value(out, static_cast<int>(cfg_.periodic_y));
+  auto write_bc = [&](const BoundaryConditionSpec &bc) {
+    write_binary_value(out, static_cast<int>(bc.type));
+    write_binary_value(out, bc.value);
+  };
+  write_bc(cfg_.pressure_bc_left);
+  write_bc(cfg_.pressure_bc_right);
+  write_bc(cfg_.pressure_bc_bottom);
+  write_bc(cfg_.pressure_bc_top);
+  write_bc(cfg_.u_bc_left);
+  write_bc(cfg_.u_bc_right);
+  write_bc(cfg_.u_bc_bottom);
+  write_bc(cfg_.u_bc_top);
+  write_bc(cfg_.v_bc_left);
+  write_bc(cfg_.v_bc_right);
+  write_bc(cfg_.v_bc_bottom);
+  write_bc(cfg_.v_bc_top);
 
   write_binary_field(out, c_);
   write_binary_field(out, c_previous_step_);
@@ -331,7 +353,7 @@ void Solver::load_restart_snapshot() {
   const std::string magic = read_binary_string(in);
   require_compatible(magic == kRestartMagic, "unrecognized restart file");
   const std::uint32_t version = read_binary_value<std::uint32_t>(in);
-  require_compatible(version == 1u, "unsupported restart file version");
+  require_compatible(version == 1u || version == 2u, "unsupported restart file version");
 
   restart_step_ = read_binary_value<int>(in);
   initial_mass_ = read_binary_value<double>(in);
@@ -355,6 +377,24 @@ void Solver::load_restart_snapshot() {
   require_compatible(nearly_equal(read_binary_value<double>(in), cfg_.bottom_wall_velocity_x), "bottom_wall_velocity_x");
   require_compatible(read_binary_value<int>(in) == static_cast<int>(cfg_.periodic_x), "periodic_x");
   require_compatible(read_binary_value<int>(in) == static_cast<int>(cfg_.periodic_y), "periodic_y");
+  if (version >= 2u) {
+    auto require_bc = [&](const BoundaryConditionSpec &bc, const char *name) {
+      require_compatible(read_binary_value<int>(in) == static_cast<int>(bc.type), std::string(name) + "_type");
+      require_compatible(nearly_equal(read_binary_value<double>(in), bc.value), std::string(name) + "_value");
+    };
+    require_bc(cfg_.pressure_bc_left, "pressure_bc_left");
+    require_bc(cfg_.pressure_bc_right, "pressure_bc_right");
+    require_bc(cfg_.pressure_bc_bottom, "pressure_bc_bottom");
+    require_bc(cfg_.pressure_bc_top, "pressure_bc_top");
+    require_bc(cfg_.u_bc_left, "u_bc_left");
+    require_bc(cfg_.u_bc_right, "u_bc_right");
+    require_bc(cfg_.u_bc_bottom, "u_bc_bottom");
+    require_bc(cfg_.u_bc_top, "u_bc_top");
+    require_bc(cfg_.v_bc_left, "v_bc_left");
+    require_bc(cfg_.v_bc_right, "v_bc_right");
+    require_bc(cfg_.v_bc_bottom, "v_bc_bottom");
+    require_bc(cfg_.v_bc_top, "v_bc_top");
+  }
 
   read_binary_field(in, c_);
   read_binary_field(in, c_previous_step_);
@@ -373,8 +413,8 @@ void Solver::load_restart_snapshot() {
   apply_scalar_bc(c_);
   apply_scalar_bc(c_previous_step_);
   apply_scalar_bc(c_two_steps_back_);
-  apply_scalar_bc(pressure_);
-  apply_scalar_bc(pressure_previous_step_);
+  apply_pressure_bc(pressure_);
+  apply_pressure_bc(pressure_previous_step_);
   apply_u_velocity_bc(u_);
   apply_v_bc(v_);
   apply_u_velocity_bc(u_previous_step_);
@@ -383,7 +423,12 @@ void Solver::load_restart_snapshot() {
   update_materials();
   update_materials_from_phase(c_previous_step_, rho_previous_step_, eta_previous_step_);
   update_midpoint_materials();
-  update_chemical_potential(c_, mu_);
+  if (is_single_phase_mode()) {
+    mu_.fill(0.0);
+    apply_scalar_bc(mu_);
+  } else {
+    update_chemical_potential(c_, mu_);
+  }
 
   pressure_correction_.fill(0.0);
   u_star_.fill(0.0);
