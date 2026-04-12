@@ -144,8 +144,6 @@ Config load_config(const std::string &path) {
   set_double("cn", cfg.cn);
   set_double("density_ratio", cfg.density_ratio);
   set_double("viscosity_ratio", cfg.viscosity_ratio);
-  set_double("stabilization_a1", cfg.stabilization_a1);
-  set_double("stabilization_a2", cfg.stabilization_a2);
   set_double("surface_tension_multiplier", cfg.surface_tension_multiplier);
   set_double("surface_tension_smoothing_weight", cfg.surface_tension_smoothing_weight);
   set_double("coupling_tolerance", cfg.coupling_tolerance);
@@ -173,6 +171,8 @@ Config load_config(const std::string &path) {
   set_double("check_divergence_max", cfg.check_divergence_max);
   set_double("check_mu_max", cfg.check_mu_max);
   set_double("check_velocity_max", cfg.check_velocity_max);
+  cfg.stabilization_a1 = stabilization_a1_from_cn(cfg.cn);
+  cfg.stabilization_a2 = stabilization_a2_from_cn(cfg.cn);
   set_bc("pressure_bc_left_type", "pressure_bc_left_value", cfg.pressure_bc_left);
   set_bc("pressure_bc_right_type", "pressure_bc_right_value", cfg.pressure_bc_right);
   set_bc("pressure_bc_bottom_type", "pressure_bc_bottom_value", cfg.pressure_bc_bottom);
@@ -188,6 +188,7 @@ Config load_config(const std::string &path) {
   set_bool("periodic_x", cfg.periodic_x);
   set_bool("periodic_y", cfg.periodic_y);
   set_bool("verbose", cfg.verbose);
+  set_bool("print_step_log", cfg.print_step_log);
   set_bool("write_vtk", cfg.write_vtk);
   set_bool("restart", cfg.restart);
   set_bool("write_restart", cfg.write_restart);

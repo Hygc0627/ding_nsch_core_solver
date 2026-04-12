@@ -23,7 +23,11 @@ double signed_distance_box(double x, double y, double cx, double cy, double hx, 
 } // namespace
 
 Solver::Solver(Config cfg)
-    : cfg_(std::move(cfg)),
+    : cfg_([&cfg]() {
+        cfg.stabilization_a1 = stabilization_a1_from_cn(cfg.cn);
+        cfg.stabilization_a2 = stabilization_a2_from_cn(cfg.cn);
+        return std::move(cfg);
+      }()),
       grid_(cfg_),
       dx_(grid_.dx),
       dy_(grid_.dy),
@@ -340,10 +344,14 @@ bool Solver::run() {
              << "RESTART file=" << (cfg_.restart_file.empty() ? restart_snapshot_path() : cfg_.restart_file)
              << " step=" << restart_step_ << " time=" << start_time;
       log_message(resume.str());
+      if (cfg_.print_step_log) {
+        std::cout << resume.str() << "\n";
+      }
     } else {
-      log_message(format_step_report(0, 0.0, last_diag_));
-      if (cfg_.verbose) {
-        print_diagnostics(0, last_diag_);
+      const std::string step_report = format_step_report(0, 0.0, last_diag_);
+      log_message(step_report);
+      if (cfg_.verbose || cfg_.print_step_log) {
+        std::cout << step_report << "\n";
       }
       if (cfg_.write_vtk) {
         write_visualization(0);
@@ -366,9 +374,10 @@ bool Solver::run() {
       if (should_write_restart(step)) {
         write_restart_snapshot(step);
       }
-      log_message(format_step_report(step, time, last_diag_));
-      if (cfg_.verbose && (step % cfg_.output_every == 0 || step == cfg_.steps)) {
-        print_diagnostics(step, last_diag_);
+      const std::string step_report = format_step_report(step, time, last_diag_);
+      log_message(step_report);
+      if ((cfg_.verbose || cfg_.print_step_log) && (step % cfg_.output_every == 0 || step == cfg_.steps)) {
+        std::cout << step_report << "\n";
       }
       if (cfg_.write_vtk && (step % cfg_.write_every == 0 || step == cfg_.steps)) {
         write_visualization(step);

@@ -4,6 +4,16 @@
 
 namespace ding {
 
+constexpr double kSqrt2 = 1.4142135623730950488;
+
+constexpr double stabilization_a1_from_cn(double cn) {
+  return (cn > 0.0) ? (3.0 * kSqrt2 / (16.0 * cn)) : 0.0;
+}
+
+constexpr double stabilization_a2_from_cn(double cn) {
+  return (cn > 0.0) ? (3.0 * kSqrt2 * cn / 4.0) : 0.0;
+}
+
 enum class BoundarySide {
   left = 0,
   right = 1,
@@ -66,8 +76,8 @@ struct Config {
   double cn = 0.02;
   double density_ratio = 0.1;
   double viscosity_ratio = 0.1;
-  double stabilization_a1 = 0.03125;
-  double stabilization_a2 = 0.125;
+  double stabilization_a1 = stabilization_a1_from_cn(cn);
+  double stabilization_a2 = stabilization_a2_from_cn(cn);
   double surface_tension_multiplier = 1.0;
   int surface_tension_smoothing_passes = 0;
   double surface_tension_smoothing_weight = 0.0;
@@ -111,6 +121,7 @@ struct Config {
   bool periodic_x = true;
   bool periodic_y = true;
   bool verbose = true;
+  bool print_step_log = false;
   bool write_vtk = true;
   bool restart = false;
   bool write_restart = true;
