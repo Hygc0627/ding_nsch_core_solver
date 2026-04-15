@@ -146,6 +146,218 @@ def set_extra_petsc_options(ksp, options_dict, handled_keys):
         petsc_options[f"{prefix}{key}"] = str(value).lower() if isinstance(value, bool) else str(value)
 
 
+def project_mean_zero(values: np.ndarray) -> np.ndarray:
+    projected = np.asarray(values, dtype=np.float64).reshape(-1).copy()
+    if projected.size:
+        projected -= np.mean(projected)
+    return projected
+
+
+def predict_ml_direction(model, trunkin, residual, grid_nx: int, grid_ny: int, device):
+    residual_array = np.asarray(residual, dtype=np.float64).reshape(-1)
+    residual_norm = float(np.linalg.norm(residual_array))
+    if not np.isfinite(residual_norm):
+        raise RuntimeError("HyDEA ML stage produced non-finite residual")
+    if residual_norm <= 1.0e-30:
+        return np.zeros_like(residual_array), residual_norm
+
+    residual_input = torch.from_numpy((residual_array / residual_norm).astype(np.float32).reshape(1, 1, grid_ny, grid_nx))
+    residual_input = residual_input.to(device)
+    q = model(residual_input.float(), trunkin).reshape(-1)
+    q_array = q.detach().cpu().numpy().astype(np.float64)
+    if not np.all(np.isfinite(q_array)):
+        raise RuntimeError("HyDEA ML stage produced non-finite search direction")
+    return q_array, residual_norm
+
+
+class PetscSeqLinearOps:
+    def __init__(self, mat, pc, nrows: int):
+        self._mat = mat
+        self._pc = pc
+        self._in = PETSc.Vec().createSeq(nrows, comm=PETSc.COMM_SELF)
+        self._out = PETSc.Vec().createSeq(nrows, comm=PETSc.COMM_SELF)
+        self._pc_in = PETSc.Vec().createSeq(nrows, comm=PETSc.COMM_SELF)
+        self._pc_out = PETSc.Vec().createSeq(nrows, comm=PETSc.COMM_SELF)
+
+    def matvec(self, values):
+        self._in.array[:] = np.asarray(values, dtype=np.float64).reshape(-1)
+        self._mat.mult(self._in, self._out)
+        return self._out.array.copy()
+
+    def pc_apply(self, values):
+        if self._pc is None:
+            return np.asarray(values, dtype=np.float64).reshape(-1).copy()
+        self._pc_in.array[:] = np.asarray(values, dtype=np.float64).reshape(-1)
+        self._pc.apply(self._pc_in, self._pc_out)
+        return self._pc_out.array.copy()
+
+
+def apply_q_projector(values, basis, basis_a):
+    projected = np.asarray(values, dtype=np.float64).reshape(-1).copy()
+    for z_vec, az_vec in zip(basis, basis_a):
+        projected -= float(np.dot(az_vec, projected)) * z_vec
+    return projected
+
+
+def build_ml_deflation_basis(
+    model,
+    trunkin,
+    linear_ops,
+    rhs_values,
+    grid_nx: int,
+    grid_ny: int,
+    device,
+    num_vectors: int,
+    enforce_zero_mean: bool,
+    monitor_log,
+    prefix: str,
+    event_index: int,
+):
+    rhs = np.asarray(rhs_values, dtype=np.float64).reshape(-1)
+    x_seed = np.zeros_like(rhs)
+    residual = rhs.copy()
+    if enforce_zero_mean:
+        residual = project_mean_zero(residual)
+
+    basis = []
+    basis_a = []
+    ml_accepted = 0
+    ml_rejected = 0
+
+    for basis_index in range(num_vectors):
+        q_vec, residual_old = predict_ml_direction(model, trunkin, residual, grid_nx, grid_ny, device)
+        if residual_old <= 1.0e-30:
+            break
+        if enforce_zero_mean:
+            q_vec = project_mean_zero(q_vec)
+
+        aq_vec = linear_ops.matvec(q_vec)
+        q_work = q_vec.copy()
+        aq_work = aq_vec.copy()
+        for z_vec, az_vec in zip(basis, basis_a):
+            coeff = float(np.dot(z_vec, aq_work))
+            q_work -= coeff * z_vec
+            aq_work -= coeff * az_vec
+
+        qtaq = float(np.dot(q_work, aq_work))
+        if not np.isfinite(qtaq) or qtaq <= 1.0e-20:
+            ml_rejected += 1
+            write_line(
+                monitor_log,
+                prefix,
+                "ml_basis_reject",
+                event_index,
+                residual_old,
+                f"basis={basis_index} qtaq={qtaq:.6e}",
+            )
+            event_index += 1
+            break
+
+        scale = 1.0 / np.sqrt(qtaq)
+        q_work *= scale
+        aq_work *= scale
+        alpha = float(np.dot(q_work, residual))
+        x_seed += alpha * q_work
+        residual -= alpha * aq_work
+        if enforce_zero_mean:
+            residual = project_mean_zero(residual)
+
+        residual_new = float(np.linalg.norm(residual))
+        basis.append(q_work)
+        basis_a.append(aq_work)
+        ml_accepted += 1
+        write_line(
+            monitor_log,
+            prefix,
+            "ml_basis",
+            event_index,
+            residual_new,
+            f"basis={basis_index} alpha={alpha:.6e} previous={residual_old:.6e}",
+        )
+        event_index += 1
+
+    return basis, basis_a, x_seed, residual, ml_accepted, ml_rejected, event_index
+
+
+def solve_deflated_pcg(
+    linear_ops,
+    rhs_values,
+    basis,
+    basis_a,
+    x_seed,
+    residual_seed,
+    atol: float,
+    max_it: int,
+    enforce_zero_mean: bool,
+    monitor_log,
+    prefix: str,
+    event_index: int,
+):
+    x = np.asarray(x_seed, dtype=np.float64).reshape(-1).copy()
+    r = np.asarray(residual_seed, dtype=np.float64).reshape(-1).copy()
+    if enforce_zero_mean:
+        r = project_mean_zero(r)
+
+    residual_norm = float(np.linalg.norm(r))
+    dpcg_iterations = 0
+    cg_events = 0
+    if residual_norm <= atol:
+        return x, residual_norm, dpcg_iterations, cg_events, event_index
+
+    y = linear_ops.pc_apply(r)
+    if enforce_zero_mean:
+        y = project_mean_zero(y)
+    z = apply_q_projector(y, basis, basis_a)
+    if enforce_zero_mean:
+        z = project_mean_zero(z)
+    rz = float(np.dot(r, z))
+    if not np.isfinite(rz) or rz <= 0.0:
+        raise RuntimeError(f"deflated PCG failed to initialize with r^T z={rz}")
+
+    p = z.copy()
+    for pcg_it in range(max_it):
+        ap = linear_ops.matvec(p)
+        pap = float(np.dot(p, ap))
+        if not np.isfinite(pap) or pap <= 1.0e-30:
+            raise RuntimeError(f"deflated PCG encountered invalid p^T A p={pap}")
+
+        alpha = rz / pap
+        x += alpha * p
+        r -= alpha * ap
+        if enforce_zero_mean:
+            r = project_mean_zero(r)
+        residual_norm = float(np.linalg.norm(r))
+        write_line(
+            monitor_log,
+            prefix,
+            "dpcg",
+            event_index,
+            residual_norm,
+            f"pcg_it={pcg_it} alpha={alpha:.6e}",
+        )
+        event_index += 1
+        cg_events += 1
+        dpcg_iterations += 1
+        if residual_norm <= atol:
+            break
+
+        y = linear_ops.pc_apply(r)
+        if enforce_zero_mean:
+            y = project_mean_zero(y)
+        z = apply_q_projector(y, basis, basis_a)
+        if enforce_zero_mean:
+            z = project_mean_zero(z)
+        rz_new = float(np.dot(r, z))
+        if not np.isfinite(rz_new) or rz_new <= 0.0:
+            raise RuntimeError(f"deflated PCG encountered invalid r^T z={rz_new}")
+
+        beta = rz_new / rz
+        p = z + beta * p
+        rz = rz_new
+
+    return x, residual_norm, dpcg_iterations, cg_events, event_index
+
+
 def try_ml_update(model, trunkin, a_torch, rhs_torch, x_array, grid_nx, grid_ny, device):
     x_tensor = torch.from_numpy(x_array.astype(np.float32)).to(device)
     r_t = rhs_torch - torch.sparse.mm(a_torch, x_tensor)
@@ -225,6 +437,8 @@ def main():
         "max_it",
         "num_cg_iterations",
         "num_ml_iterations",
+        "num_deflation_vectors",
+        "project_mean_zero",
         "cuda",
         "monitor",
         "monitor_stdout",
@@ -233,9 +447,11 @@ def main():
 
     num_cg = int(options.get("num_cg_iterations", 3))
     num_ml = int(options.get("num_ml_iterations", 2))
+    num_deflation_vectors = int(options.get("num_deflation_vectors", num_ml))
     schedule = str(options.get("schedule", "warmstart_once")).strip().lower()
     atol = float(options.get("atol", 1.0e-6))
     max_it = int(options.get("max_it", 800))
+    enforce_zero_mean = bool(options.get("project_mean_zero", False))
     ksp.setInitialGuessNonzero(True)
     ksp.setTolerances(
         rtol=float(options.get("rtol", 0.0)),
@@ -260,6 +476,7 @@ def main():
     ml_events = 0
     ml_accepted = 0
     ml_rejected = 0
+    deflation_vectors = 0
 
     def log_cg(_ksp, its, rnorm):
         nonlocal event_index, cg_events
@@ -274,6 +491,7 @@ def main():
     values = torch.tensor(vals, dtype=torch.float32, device=device)
     a_torch = torch.sparse_coo_tensor(row_indices, values, (nrows, ncols), device=device).coalesce()
     rhs_torch = torch.from_numpy(rhs_values.astype(np.float32)).to(device).reshape(nrows, 1)
+    linear_ops = PetscSeqLinearOps(mat, pc, nrows)
 
     x_array = np.zeros((nrows, 1), dtype=np.float64)
     final_residual = np.inf
@@ -346,6 +564,40 @@ def main():
                     x_array = x_vec.getArray(readonly=True).copy().reshape(nrows, 1)
                     final_residual = float(ksp.getResidualNorm())
                     algorithm_iterations += num_cg
+        elif schedule == "deflated_pcg":
+            basis, basis_a, x_seed, residual_seed, ml_accepted, ml_rejected, event_index = build_ml_deflation_basis(
+                model,
+                trunkin,
+                linear_ops,
+                rhs_values,
+                args.grid_nx,
+                args.grid_ny,
+                device,
+                num_deflation_vectors,
+                enforce_zero_mean,
+                monitor_log,
+                prefix,
+                event_index,
+            )
+            deflation_vectors = len(basis)
+            ml_events = ml_accepted + ml_rejected
+            algorithm_iterations += deflation_vectors
+            x_solution, final_residual, dpcg_iterations, cg_events, event_index = solve_deflated_pcg(
+                linear_ops,
+                rhs_values,
+                basis,
+                basis_a,
+                x_seed,
+                residual_seed,
+                atol,
+                max(1, max_it - deflation_vectors),
+                enforce_zero_mean,
+                monitor_log,
+                prefix,
+                event_index,
+            )
+            algorithm_iterations += dpcg_iterations
+            x_array = x_solution.reshape(nrows, 1)
         else:
             raise RuntimeError(f"unsupported HyDEA schedule: {schedule}")
 
@@ -362,6 +614,8 @@ def main():
         handle.write(f"ml_events {ml_events}\n")
         handle.write(f"ml_accepted {ml_accepted}\n")
         handle.write(f"ml_rejected {ml_rejected}\n")
+        handle.write(f"deflation_vectors {deflation_vectors}\n")
+        handle.write(f"schedule {schedule}\n")
         handle.write(f"ksp_type {ksp.getType()}\n")
         handle.write(f"pc_type {pc.getType()}\n")
 

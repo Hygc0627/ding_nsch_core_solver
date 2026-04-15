@@ -78,6 +78,22 @@ void Solver::update_midpoint_materials() {
   apply_scalar_bc(eta_mid_);
 }
 
+void Solver::zero_chemical_potential() {
+  mu_.fill(0.0);
+  apply_scalar_bc(mu_);
+}
+
+void Solver::clear_surface_tension_force() {
+  surface_fx_cell_.fill(0.0);
+  surface_fy_cell_.fill(0.0);
+  surface_fx_u_.fill(0.0);
+  surface_fy_v_.fill(0.0);
+  apply_scalar_bc(surface_fx_cell_);
+  apply_scalar_bc(surface_fy_cell_);
+  apply_u_bc(surface_fx_u_);
+  apply_v_bc(surface_fy_v_);
+}
+
 void Solver::update_chemical_potential(const Field2D &c_state, Field2D &mu_state) const {
   Field2D work = c_state;
   apply_scalar_bc(work);
@@ -90,6 +106,14 @@ void Solver::update_chemical_potential(const Field2D &c_state, Field2D &mu_state
     }
   }
   apply_scalar_bc(mu_state);
+}
+
+void Solver::refresh_chemical_potential_for_current_phase() {
+  if (should_compute_chemical_potential()) {
+    update_chemical_potential(c_, mu_);
+    return;
+  }
+  zero_chemical_potential();
 }
 
 void Solver::ensure_ch_operator_matrices() const {
@@ -109,8 +133,8 @@ void Solver::ensure_ch_linear_system(double alpha0) const {
     return;
   }
 
-  const double beta1 = cfg_.stabilization_a1 / cfg_.pe;
-  const double beta2 = cfg_.stabilization_a2 / cfg_.pe;
+  const double beta1 = stabilization_a1_from_cn(cfg_.cn) / cfg_.pe;
+  const double beta2 = stabilization_a2_from_cn(cfg_.cn) / cfg_.pe;
   ch_linear_system_matrix_ =
       ch_sparse_krylov::build_cahn_hilliard_operator(ch_laplacian_matrix_, ch_biharmonic_matrix_, alpha0, beta1, beta2);
   ch_linear_system_preconditioner_ = ch_sparse_krylov::build_preconditioner(ch_linear_system_matrix_);
@@ -153,15 +177,8 @@ double Solver::phase_weno_y_face_value(const Field2D &c_state, const Field2D &v_
 }
 
 void Solver::update_surface_tension_force(const Field2D &c_old, const Field2D &c_new) {
-  if (cfg_.surface_tension_multiplier == 0.0) {
-    surface_fx_cell_.fill(0.0);
-    surface_fy_cell_.fill(0.0);
-    surface_fx_u_.fill(0.0);
-    surface_fy_v_.fill(0.0);
-    apply_scalar_bc(surface_fx_cell_);
-    apply_scalar_bc(surface_fy_cell_);
-    apply_u_bc(surface_fx_u_);
-    apply_v_bc(surface_fy_v_);
+  if (cfg_.surface_tension_multiplier == 0.0 || !should_compute_chemical_potential()) {
+    clear_surface_tension_force();
     return;
   }
 
@@ -236,6 +253,31 @@ void Solver::update_surface_tension_force(const Field2D &c_old, const Field2D &c
   smooth_field(surface_fy_cell_, [&](Field2D &field) { apply_scalar_bc(field); });
   smooth_field(surface_fx_u_, [&](Field2D &field) { apply_u_bc(field); });
   smooth_field(surface_fy_v_, [&](Field2D &field) { apply_v_bc(field); });
+}
+
+Solver::PhaseStepReport Solver::advance_phase_state(int step) {
+  PhaseStepReport report;
+  if (should_solve_cahn_hilliard()) {
+    // Ding 2007 §3:
+    // (1) solve CH with u^n
+    // (2) compute surface tension with 0.5*(C^n + C^{n+1})
+    // (3) solve NS/projection once to obtain u^{n+1}
+    report.ch_residual = solve_cahn_hilliard_semi_implicit(u_, v_, step);
+    update_materials();
+    update_midpoint_materials();
+    update_surface_tension_force(c_previous_step_, c_);
+    return report;
+  }
+
+  update_materials();
+  update_midpoint_materials();
+  refresh_chemical_potential_for_current_phase();
+  update_surface_tension_force(c_previous_step_, c_);
+  last_ch_iterations_ = 0;
+  last_ch_solver_name_ = "NotUsed";
+  last_ch_equation_residual_ = 0.0;
+  report.outer_iterations = 0;
+  return report;
 }
 
 void Solver::build_phase_advection_fluxes(const Field2D &c_state, const Field2D &u_adv, const Field2D &v_adv,
@@ -341,11 +383,13 @@ void Solver::build_phase_explicit_operator(const Field2D &c_state, const Field2D
   build_phase_advection_fluxes(c_state, u_adv, v_adv, adv_flux_x, adv_flux_y, adv_rhs);
   build_phase_diffusion_fluxes(mu_state, mobility, diff_flux_x, diff_flux_y, diff_div);
 
+  const double stabilization_a1 = stabilization_a1_from_cn(cfg_.cn);
+  const double stabilization_a2 = stabilization_a2_from_cn(cfg_.cn);
   for (int i = 0; i < cfg_.nx; ++i) {
     for (int j = 0; j < cfg_.ny; ++j) {
       explicit_operator(i, j) =
-          diff_div(i, j) / cfg_.pe -
-          (cfg_.stabilization_a1 * lap_c(i, j) - cfg_.stabilization_a2 * biharm_c(i, j)) / cfg_.pe + adv_rhs(i, j);
+          diff_div(i, j) / cfg_.pe - (stabilization_a1 * lap_c(i, j) - stabilization_a2 * biharm_c(i, j)) / cfg_.pe +
+          adv_rhs(i, j);
     }
   }
   apply_scalar_bc(explicit_operator);

@@ -157,7 +157,10 @@ void Solver::run_pressure_analysis_from_snapshot(const PressureAnalysisSnapshot 
   namespace fs = std::filesystem;
 
   const bool use_split = cfg_.pressure_scheme == "liu_split_icpcg" || cfg_.pressure_scheme == "split_icpcg" ||
-                         cfg_.pressure_scheme == "paper_split_icpcg" || cfg_.pressure_scheme == "liu_split_ildlt_pcg" ||
+                         cfg_.pressure_scheme == "paper_split_icpcg" || cfg_.pressure_scheme == "liu_split_dcdm_icpcg" ||
+                         cfg_.pressure_scheme == "split_dcdm_icpcg" ||
+                         cfg_.pressure_scheme == "paper_split_dcdm_icpcg" ||
+                         cfg_.pressure_scheme == "liu_split_ildlt_pcg" ||
                          cfg_.pressure_scheme == "split_ildlt_pcg" || cfg_.pressure_scheme == "paper_split_ildlt_pcg";
   Field2D pressure_extrapolated(cfg_.nx, cfg_.ny, cfg_.ghost, 0.0);
   const Field2D *pressure_extrapolated_ptr = nullptr;
@@ -181,7 +184,11 @@ void Solver::run_pressure_analysis_from_snapshot(const PressureAnalysisSnapshot 
       preconditioner = ch_sparse_krylov::build_diagonal_preconditioner(matrix);
     }
   } else {
-    solver_name = use_split ? "SplitICCPCG" : "ICCPCG";
+    solver_name =
+        (cfg_.pressure_scheme == "liu_split_dcdm_icpcg" || cfg_.pressure_scheme == "split_dcdm_icpcg" ||
+         cfg_.pressure_scheme == "paper_split_dcdm_icpcg")
+            ? "SplitDCDMICC"
+            : (use_split ? "SplitICCPCG" : "ICCPCG");
     if (!ch_sparse_krylov::try_build_incomplete_cholesky(matrix, preconditioner)) {
       preconditioner = ch_sparse_krylov::build_diagonal_preconditioner(matrix);
     }

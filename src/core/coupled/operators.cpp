@@ -399,7 +399,9 @@ double Solver::pressure_gradient_v_face(const Field2D &pressure_like, int i, int
 
 bool Solver::use_liu_pressure_split() const {
   return cfg_.pressure_scheme == "liu_split_icpcg" || cfg_.pressure_scheme == "split_icpcg" ||
-         cfg_.pressure_scheme == "paper_split_icpcg" || cfg_.pressure_scheme == "liu_split_ildlt_pcg" ||
+         cfg_.pressure_scheme == "paper_split_icpcg" || cfg_.pressure_scheme == "liu_split_dcdm_icpcg" ||
+         cfg_.pressure_scheme == "split_dcdm_icpcg" || cfg_.pressure_scheme == "paper_split_dcdm_icpcg" ||
+         cfg_.pressure_scheme == "liu_split_ildlt_pcg" ||
          cfg_.pressure_scheme == "split_ildlt_pcg" || cfg_.pressure_scheme == "paper_split_ildlt_pcg" ||
          cfg_.pressure_scheme == "split_petsc_pcg" || cfg_.pressure_scheme == "paper_split_petsc_pcg" ||
          cfg_.pressure_scheme == "liu_split_petsc_pcg" || cfg_.pressure_scheme == "split_hydea" ||

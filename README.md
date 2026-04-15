@@ -78,5 +78,35 @@ ctest --test-dir build --output-on-failure
   隐式常系数泊松用 ICC(0)-preconditioned CG。
 - `liu_split_ildlt_pcg` / `split_ildlt_pcg` / `paper_split_ildlt_pcg`
   同一套 split Poisson 公式，但隐式常系数泊松用 ILDLT-preconditioned CG。
+- `petsc_pcg`
+  将压力矩阵/RHS 导出给 `python/petsc_pressure_solver.py`，由 `petsc4py` 调用 PETSc KSP 求解，参数在 `python/petsc_pressure_options.py` 或用户自定义 Python 配置中指定。
 
-代码中仍保留了 `petsc_pcg` 和 `hydea` 两个外部后端接口，但这个独立仓库没有打包对应 Python 驱动脚本。只有在你另外提供这些脚本，并正确设置 `PETSC_DIR` / `PETSC_ARCH` 环境变量时，才应启用它们。
+`petsc_pcg` 现在已经随仓库打包，但你仍然需要：
+
+- 可用的 `petsc4py`
+- 正确的 `PETSC_DIR` / `PETSC_ARCH`
+- 在配置里指定合适的 `petsc_python_executable`，如果系统 `python3` 里没有 `petsc4py`
+
+`hydea` 仍然保留为外部接口，需要你另外提供对应脚本和模型文件。
+
+## Boundary Conditions
+
+周期性仍然按方向配置：
+
+- `periodic_x = true/false`
+- `periodic_y = true/false`
+
+对于非周期方向，现在可以分别给 `u`、`v`、`pressure` 的四条边设置：
+
+- `*_bc_left_type`, `*_bc_left_value`
+- `*_bc_right_type`, `*_bc_right_value`
+- `*_bc_bottom_type`, `*_bc_bottom_value`
+- `*_bc_top_type`, `*_bc_top_value`
+
+其中 `*` 可替换成 `u`、`v` 或 `pressure`，类型支持：
+
+- `dirichlet`
+- `neumann`
+- `unset`
+
+更完整的说明见 [docs/solver_user_guide.md](docs/solver_user_guide.md)。

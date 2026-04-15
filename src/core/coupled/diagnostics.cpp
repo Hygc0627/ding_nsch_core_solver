@@ -61,7 +61,7 @@ void Solver::populate_timestep_limits(Diagnostics &diag) const {
 
   diag.dt_limit_capillary = std::numeric_limits<double>::infinity();
   diag.dt_limit_ch_explicit = std::numeric_limits<double>::infinity();
-  if (!is_advection_only_mode() && !is_single_phase_mode()) {
+  if (should_solve_cahn_hilliard()) {
     const double rho_scale = std::max(diag.rho_max, kTiny);
     diag.dt_limit_capillary =
         kCapillarySafety * std::sqrt(std::max(cfg_.re * cfg_.ca * h * h * h / rho_scale, 0.0));

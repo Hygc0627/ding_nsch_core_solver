@@ -89,6 +89,8 @@ periodic_y = true
   VTK 写出频率。
 - `verbose`
   是否把逐步日志打印到终端。无论这个值是什么，`run.log` 都会写到 case 目录。
+- `print_step_log`
+  是否按 `output_every` 把时间步日志打印到终端；适合想看 step report，但不想打开其它详细求解器输出的情况。
 - `write_vtk`
   是否写 VTK/PVD 可视化文件。
 - `write_restart`
@@ -282,7 +284,35 @@ advect_v = 0.0
 
 ## 7. 边界条件怎么设置
 
-当前边界条件是由 `periodic_x` 和 `periodic_y` 这两个开关控制的。
+当前边界条件分成两层：
+
+- `periodic_x` 和 `periodic_y` 仍然负责控制某个方向是否周期。
+- 对于非周期方向，现在可以分别给 `u`、`v`、`pressure` 的每一条边设置 `Dirichlet` 或 `Neumann`。
+
+边界类型配置格式是：
+
+```ini
+u_bc_left_type = dirichlet
+u_bc_left_value = 0.0
+
+v_bc_top_type = neumann
+v_bc_top_value = 0.0
+
+pressure_bc_right_type = dirichlet
+pressure_bc_right_value = 1.0
+```
+
+可用类型只有：
+
+- `dirichlet`
+- `neumann`
+- `unset`
+
+其中：
+
+- `unset` 表示使用程序默认边界。
+- `neumann` 的 `value` 表示外法向导数 `∂/∂n` 的值，不是坐标方向导数。
+- 如果某个方向已经是周期边界，则该方向对应的显式边界配置不能再设置，程序会直接报错。
 
 ## 7.1 标量场边界条件
 
@@ -296,12 +326,15 @@ advect_v = 0.0
 边界条件规则：
 
 - 如果某个方向 `periodic = true`，就做周期边界。
-- 如果某个方向 `periodic = false`，就对标量场使用零法向梯度边界。
+- 如果某个方向 `periodic = false`，则：
+  - `pressure` 可以按边指定 `Dirichlet` 或 `Neumann`
+  - 其他标量场当前仍然固定使用零法向梯度边界
 
 也就是说：
 
-- `c`、`mu`、`pressure` 在非周期边界上当前都是 Neumann 型边界。
-- 当前没有接触角模型，也没有指定 Dirichlet 相场边界。
+- `c`、`mu`、`rho`、`eta` 在非周期边界上当前仍然是 Neumann 型边界。
+- `pressure` 默认也是零法向梯度，但你现在可以覆盖成任意按边的 `Dirichlet/Neumann`。
+- 当前仍然没有接触角模型，也没有指定 Dirichlet 相场边界。
 
 ## 7.2 速度边界条件
 
@@ -310,41 +343,52 @@ advect_v = 0.0
 - `u` 在 x-face。
 - `v` 在 y-face。
 
-### x 方向非周期边界
+对于速度，现在可以在四条边分别设置：
 
-如果
+- `u_bc_left/right/bottom/top_type`
+- `u_bc_left/right/bottom/top_value`
+- `v_bc_left/right/bottom/top_type`
+- `v_bc_left/right/bottom/top_value`
+
+如果你不显式设置，默认行为是：
+
+- `u`
+  - 左右边界默认 `Dirichlet 0`
+  - 上下边界默认 `Dirichlet bottom_wall_velocity_x / top_wall_velocity_x`
+- `v`
+  - 四条边默认 `Dirichlet 0`
+
+也就是说：
+
+- 旧配置里的 `top_wall_velocity_x` 和 `bottom_wall_velocity_x` 仍然有效，但现在只是 `u` 在上下边界的默认值来源。
+- 如果你显式写了 `u_bc_bottom_*` 或 `u_bc_top_*`，它们会覆盖 `bottom_wall_velocity_x/top_wall_velocity_x`。
+
+一个简单例子：
 
 ```ini
 periodic_x = false
-```
-
-则左右边界当前是固壁边界：
-
-- `u = 0`
-- `v = 0`
-
-也就是没有穿透，也没有沿壁滑移。
-
-当前不支持设置左右壁面的移动速度。
-
-### y 方向非周期边界
-
-如果
-
-```ini
 periodic_y = false
+
+u_bc_left_type = dirichlet
+u_bc_left_value = 0.0
+u_bc_right_type = dirichlet
+u_bc_right_value = 0.0
+u_bc_bottom_type = dirichlet
+u_bc_bottom_value = -1.0
+u_bc_top_type = dirichlet
+u_bc_top_value = 1.0
+
+v_bc_left_type = dirichlet
+v_bc_left_value = 0.0
+v_bc_right_type = dirichlet
+v_bc_right_value = 0.0
+v_bc_bottom_type = dirichlet
+v_bc_bottom_value = 0.0
+v_bc_top_type = dirichlet
+v_bc_top_value = 0.0
 ```
 
-则上下边界总是没有法向穿透：
-
-- `v = 0`
-
-而切向速度 `u` 由下面两种情况决定：
-
-- 如果 `top_wall_velocity_x` 和 `bottom_wall_velocity_x` 都是 `0`，则上下壁面是静止 no-slip，`u = 0`。
-- 如果它们有非零值，则上下壁面 `u` 被强制成给定的壁面速度。
-
-所以当前最常见的两类设置是：
+所以当前最常见的几类设置仍然是：
 
 1. 周期盒子里的静滴
 
@@ -358,18 +402,32 @@ periodic_y = true
 ```ini
 periodic_x = true
 periodic_y = false
-top_wall_velocity_x = ...
-bottom_wall_velocity_x = ...
+u_bc_bottom_type = dirichlet
+u_bc_bottom_value = ...
+u_bc_top_type = dirichlet
+u_bc_top_value = ...
+v_bc_bottom_type = dirichlet
+v_bc_bottom_value = 0.0
+v_bc_top_type = dirichlet
+v_bc_top_value = 0.0
 ```
 
 ## 7.3 压力边界条件
 
-压力修正方程当前是：
+压力现在也可以按边设置：
 
-- 周期方向：周期边界。
-- 非周期方向：零法向梯度。
+- `pressure_bc_left/right/bottom/top_type`
+- `pressure_bc_left/right/bottom/top_value`
 
-也就是说，当前没有显式压力 Dirichlet 边界，也没有开边界条件。
+默认行为是：
+
+- 周期方向：周期边界
+- 非周期方向：`Neumann 0`
+
+也就是说：
+
+- 现在已经支持显式压力 `Dirichlet` 和 `Neumann`
+- 但仍然没有通用开边界模型；如果你要做 outflow，需要你自己把它等价成合适的 `pressure` 和 `velocity` 边界组合
 
 ## 8. 求解器相关配置
 
@@ -383,13 +441,13 @@ bottom_wall_velocity_x = ...
   CH 线性迭代最大次数。
 - `ch_tolerance`
   CH 线性求解容限。
-- `stabilization_a1`, `stabilization_a2`
-  CH 稳定化参数。
 
 注意：
 
 - CH 线性求解默认优先使用稀疏预条件 PCG。
 - 当前代码里 CH 仍保留了对角预条件 fallback。
+- CH 稳定化系数 `a1`、`a2` 由 `cn` 在代码内部自动推导，不再作为 case 配置项暴露。
+- 若 case 文件仍写入 `stabilization_a1` 或 `stabilization_a2`，程序会直接报错，避免误以为它们仍然生效。
 
 ### 8.2 动量预测器
 
@@ -421,18 +479,54 @@ bottom_wall_velocity_x = ...
 - `ildlt_pcg`
 - `liu_split_icpcg`
 - `liu_split_ildlt_pcg`
-
-另外还有：
-
 - `petsc_pcg`
 - `hydea`
 
-但这两个依赖仓库外部 Python 脚本和外部环境，没有额外准备时不要直接选。
+其中：
+
+- `petsc_pcg` 现在已经随仓库提供了 Python 驱动脚本：
+  - `python/petsc_pressure_solver.py`
+  - `python/petsc_pressure_options.py`
+- `hydea` 仍然依赖仓库外部脚本和模型文件
+
+如果你要用 `petsc_pcg`，通常需要在配置里补这项：
+
+```ini
+petsc_python_executable = /path/to/python/with/petsc4py
+```
+
+如果你想用自定义 KSP/PC 选项，可以在配置里改：
+
+```ini
+petsc_solver_script = python/petsc_pressure_solver.py
+petsc_solver_config = python/petsc_pressure_options.py
+```
+
+然后在 `petsc_pressure_options.py` 里指定，例如：
+
+```python
+PETSCPRESSURE_OPTIONS = {
+    "ksp_type": "cg",
+    "pc_type": "icc",
+    "norm_type": "unpreconditioned",
+    "rtol": 0.0,
+    "atol": 1.0e-6,
+    "max_it": 1000,
+    "monitor": True,
+    "monitor_stdout": False,
+}
+```
+
+程序会自动根据当前压力边界类型决定是否给 PETSc 设置常数零空间：
+
+- 全 Neumann / 周期压力边界：使用常数零空间
+- 只要存在压力 Dirichlet：不使用常数零空间
 
 关于残差含义：
 
 - `jacobi`：`pressure_tolerance` 对应的是 Jacobi 迭代中的绝对残差。
 - `icpcg` / `ildlt_pcg` / `liu_split_*`：`pressure_tolerance` 对应的是 Krylov 线性求解返回的相对残差。
+- `petsc_pcg`：最终记录的是 PETSc 报告文件里的残差范数，具体意义由 Python 配置中的 `norm_type` 决定。
 
 ## 9. 验收阈值与失败条件
 
@@ -542,6 +636,7 @@ restart 时不应该修改：
 - `periodic_x`, `periodic_y`
 - `body_force_x`, `body_force_y`
 - `top_wall_velocity_x`, `bottom_wall_velocity_x`
+- 所有 `u_bc_*`、`v_bc_*`、`pressure_bc_*` 的 `type/value`
 
 这些量如果和快照不一致，程序会直接拒绝加载。
 
@@ -626,6 +721,55 @@ write_vtk = true
 verbose = false
 output_dir = output
 ```
+
+### 12.3 单相流基线
+
+```ini
+name = my_single_phase
+mode = single_phase
+nx = 64
+ny = 64
+ghost = 3
+steps = 100
+dt = 1e-4
+lx = 1.0
+ly = 1.0
+
+re = 100.0
+ca = 1.0
+pe = 150.0
+cn = 0.02
+
+# single_phase 模式下相场保持常数，不再求解 CH，也不施加界面张力。
+# 默认使用 c=1 的参考流体；若想使用另一侧常物性流体，可设 invert_phase = true。
+density_ratio = 0.1
+viscosity_ratio = 0.1
+invert_phase = false
+
+periodic_x = false
+periodic_y = false
+top_wall_velocity_x = 1.0
+bottom_wall_velocity_x = 0.0
+
+pressure_scheme = icpcg
+poisson_iterations = 1000
+pressure_tolerance = 1e-10
+momentum_iterations = 100
+momentum_tolerance = 1e-8
+
+write_vtk = false
+verbose = false
+output_dir = output
+```
+
+也可以用更通用的冻结相场写法：
+
+```ini
+mode = coupled
+freeze_ch = true
+```
+
+这会停止 CH 时间推进，但仍然保留当前相场对 `rho`、`eta`、`mu` 和表面张力项的影响。若目标只是单相流，继续使用均匀初值即可；此时它与 `single_phase` 的结果一致，但更方便后续扩展到“冻结界面”的流动算例。
 
 ## 12. 当前限制
 

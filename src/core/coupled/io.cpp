@@ -423,12 +423,7 @@ void Solver::load_restart_snapshot() {
   update_materials();
   update_materials_from_phase(c_previous_step_, rho_previous_step_, eta_previous_step_);
   update_midpoint_materials();
-  if (is_single_phase_mode()) {
-    mu_.fill(0.0);
-    apply_scalar_bc(mu_);
-  } else {
-    update_chemical_potential(c_, mu_);
-  }
+  refresh_chemical_potential_for_current_phase();
 
   pressure_correction_.fill(0.0);
   u_star_.fill(0.0);

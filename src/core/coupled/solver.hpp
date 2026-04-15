@@ -51,6 +51,11 @@ public:
   bool run();
 
 private:
+  struct PhaseStepReport {
+    double ch_residual = 0.0;
+    int outer_iterations = 1;
+  };
+
   Config cfg_;
   UniformGrid2D grid_;
   double dx_;
@@ -116,9 +121,19 @@ private:
   std::string petsc_pressure_worker_matrix_path_;
   std::string petsc_pressure_worker_options_path_;
   bool petsc_pressure_worker_use_constant_nullspace_ = false;
+  pid_t dcdm_direction_worker_pid_ = -1;
+  FILE *dcdm_direction_worker_in_ = nullptr;
+  FILE *dcdm_direction_worker_out_ = nullptr;
+  std::string dcdm_direction_worker_options_path_;
+  std::string dcdm_direction_worker_model_path_;
+  int dcdm_direction_worker_grid_nx_ = 0;
+  int dcdm_direction_worker_grid_ny_ = 0;
 
   bool is_advection_only_mode() const;
   bool is_single_phase_mode() const;
+  bool is_phase_transport_frozen() const;
+  bool should_solve_cahn_hilliard() const;
+  bool should_compute_chemical_potential() const;
   void initialize_phase();
   void initialize_velocity();
   void initialize_zalesak_disk();
@@ -140,8 +155,12 @@ private:
   void update_materials();
   void update_materials_from_phase(const Field2D &c_state, Field2D &rho_state, Field2D &eta_state) const;
   void update_midpoint_materials();
+  void zero_chemical_potential();
+  void clear_surface_tension_force();
   void update_chemical_potential(const Field2D &c_state, Field2D &mu_state) const;
   void update_surface_tension_force(const Field2D &c_old, const Field2D &c_new);
+  PhaseStepReport advance_phase_state(int step);
+  void refresh_chemical_potential_for_current_phase();
 
   bool advance_one_timestep(int step);
   double solve_phase_advection_only(const Field2D &u_adv, const Field2D &v_adv);
@@ -242,6 +261,7 @@ private:
   double solve_pressure_correction_icpcg();
   double solve_pressure_correction_ildlt_pcg();
   double solve_pressure_correction_liu_split_icpcg();
+  double solve_pressure_correction_liu_split_dcdm_icpcg();
   double solve_pressure_correction_liu_split_ildlt_pcg();
   double solve_pressure_correction_petsc();
   double solve_pressure_correction_hydea();
@@ -252,6 +272,10 @@ private:
   void solve_pressure_correction_petsc_via_worker(const std::string &rhs_path, const std::string &solution_path,
                                                   const std::string &report_path, const std::string &monitor_log_path,
                                                   const std::string &log_prefix);
+  void start_dcdm_direction_worker(const std::string &options_path, const std::string &model_path, int grid_nx,
+                                   int grid_ny);
+  void stop_dcdm_direction_worker();
+  void request_dcdm_direction_via_worker(const std::string &input_path, const std::string &output_path);
   bool use_liu_pressure_split() const;
   double liu_split_reference_density() const;
   void build_liu_split_pressure_extrapolation(Field2D &pressure_extrapolated) const;

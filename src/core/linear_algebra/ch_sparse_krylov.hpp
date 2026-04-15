@@ -60,6 +60,25 @@ struct CGMonitorData {
 using VectorProjection = std::function<void(std::vector<double> &)>;
 using CGMonitor = std::function<void(const CGMonitorData &)>;
 
+struct DirectionGenerationContext {
+  int iteration = 0;
+  double residual_norm = 0.0;
+  const std::vector<double> *x = nullptr;
+  const std::vector<double> *r = nullptr;
+  const std::vector<double> *rhs = nullptr;
+};
+
+using DirectionGenerator =
+    std::function<bool(const std::vector<double> &normalized_residual, std::vector<double> &candidate_direction,
+                       const DirectionGenerationContext &context)>;
+
+struct DCDMOptions {
+  int history_size = 2;
+  int max_stored_directions = 8;
+  int restart_interval = 0;
+  double direction_floor = 1.0e-30;
+};
+
 inline double square(double value) { return value * value; }
 
 inline double dot_product(const std::vector<double> &a, const std::vector<double> &b) {
@@ -68,6 +87,19 @@ inline double dot_product(const std::vector<double> &a, const std::vector<double
     value += a[idx] * b[idx];
   }
   return value;
+}
+
+inline double l2_norm(const std::vector<double> &values) {
+  return std::sqrt(std::max(dot_product(values, values), 0.0));
+}
+
+inline bool vector_is_finite(const std::vector<double> &values) {
+  for (double value : values) {
+    if (!std::isfinite(value)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 inline void finalize_row_maps(const std::vector<std::map<int, double>> &row_maps, SparseMatrixCSR &matrix) {
@@ -622,6 +654,183 @@ inline LinearSolveReport solve_preconditioned_cg(const SparseMatrixCSR &matrix, 
       project_vector(p);
     }
     rz_old = rz_new;
+  }
+
+  return report;
+}
+
+inline LinearSolveReport solve_dcdm_conjugate_directions(const SparseMatrixCSR &matrix, const std::vector<double> &rhs,
+                                                         int max_iterations, double tolerance, std::vector<double> &x,
+                                                         const DirectionGenerator &direction_generator,
+                                                         const DCDMOptions &options = {},
+                                                         const VectorProjection &project_vector = {},
+                                                         const CGMonitor &monitor = {}) {
+  if (matrix.n <= 0) {
+    throw std::runtime_error("cannot solve an empty linear system");
+  }
+  if (static_cast<int>(rhs.size()) != matrix.n) {
+    throw std::runtime_error("dcdm rhs size mismatch");
+  }
+
+  if (static_cast<int>(x.size()) != matrix.n) {
+    x.assign(static_cast<std::size_t>(matrix.n), 0.0);
+  }
+
+  std::vector<double> ax;
+  apply_matrix(matrix, x, ax);
+
+  std::vector<double> r(static_cast<std::size_t>(matrix.n), 0.0);
+  for (int idx = 0; idx < matrix.n; ++idx) {
+    r[static_cast<std::size_t>(idx)] = rhs[static_cast<std::size_t>(idx)] - ax[static_cast<std::size_t>(idx)];
+  }
+  if (project_vector) {
+    project_vector(r);
+    project_vector(x);
+  }
+
+  const double rhs_norm = std::sqrt(std::max(dot_product(rhs, rhs), 0.0));
+  LinearSolveReport report;
+  report.absolute_residual = l2_norm(r);
+  report.relative_residual = report.absolute_residual / std::max(rhs_norm, 1.0e-30);
+  if (monitor) {
+    CGMonitorData data;
+    data.iteration = 0;
+    data.absolute_residual = report.absolute_residual;
+    data.relative_residual = report.relative_residual;
+    data.iterate_residual = report.iterate_residual;
+    data.x = &x;
+    data.r = &r;
+    monitor(data);
+  }
+  if (report.relative_residual < tolerance || report.absolute_residual < tolerance) {
+    return report;
+  }
+
+  std::vector<std::vector<double>> directions;
+  std::vector<std::vector<double>> adirections;
+  const int iteration_limit = std::max(1, max_iterations);
+  const int max_keep = std::max(options.max_stored_directions, std::max(options.history_size, 1));
+
+  for (int iter = 0; iter < iteration_limit; ++iter) {
+    if (options.restart_interval > 0 && iter > 0 && (iter % options.restart_interval) == 0) {
+      directions.clear();
+      adirections.clear();
+    }
+
+    const double residual_norm = l2_norm(r);
+    if (residual_norm < tolerance) {
+      break;
+    }
+
+    std::vector<double> r_hat = r;
+    for (double &value : r_hat) {
+      value /= std::max(residual_norm, options.direction_floor);
+    }
+
+    std::vector<double> z;
+    const DirectionGenerationContext context{iter, residual_norm, &x, &r, &rhs};
+    bool direction_ok = direction_generator && direction_generator(r_hat, z, context);
+    if (!direction_ok || static_cast<int>(z.size()) != matrix.n || !vector_is_finite(z) ||
+        l2_norm(z) < options.direction_floor) {
+      z = r;
+    }
+    if (project_vector) {
+      project_vector(z);
+    }
+    if (!vector_is_finite(z) || l2_norm(z) < options.direction_floor) {
+      z = r;
+      if (project_vector) {
+        project_vector(z);
+      }
+    }
+
+    std::vector<double> d = z;
+    int history_begin = 0;
+    if (options.history_size > 0 && static_cast<int>(directions.size()) > options.history_size) {
+      history_begin = static_cast<int>(directions.size()) - options.history_size;
+    }
+    for (int idx = history_begin; idx < static_cast<int>(directions.size()); ++idx) {
+      const double denom_hist = dot_product(directions[static_cast<std::size_t>(idx)],
+                                            adirections[static_cast<std::size_t>(idx)]);
+      if (!std::isfinite(denom_hist) || std::abs(denom_hist) < options.direction_floor) {
+        continue;
+      }
+      const double coeff = dot_product(d, adirections[static_cast<std::size_t>(idx)]) / denom_hist;
+      for (int j = 0; j < matrix.n; ++j) {
+        d[static_cast<std::size_t>(j)] -= coeff * directions[static_cast<std::size_t>(idx)][static_cast<std::size_t>(j)];
+      }
+    }
+    if (project_vector) {
+      project_vector(d);
+    }
+
+    std::vector<double> ad;
+    apply_matrix(matrix, d, ad);
+    double rd = dot_product(r, d);
+    double dad = dot_product(d, ad);
+    if (!vector_is_finite(d) || !vector_is_finite(ad) || l2_norm(d) < options.direction_floor ||
+        !std::isfinite(rd) || rd <= 0.0 || !std::isfinite(dad) || std::abs(dad) < options.direction_floor) {
+      d = r;
+      if (project_vector) {
+        project_vector(d);
+      }
+      apply_matrix(matrix, d, ad);
+      rd = dot_product(r, d);
+      dad = dot_product(d, ad);
+      if (!std::isfinite(rd) || rd <= 0.0 || !std::isfinite(dad) || std::abs(dad) < options.direction_floor) {
+        throw std::runtime_error("dcdm breakdown: invalid fallback direction");
+      }
+    }
+
+    const double alpha = rd / dad;
+    double update_sq = 0.0;
+    for (int idx = 0; idx < matrix.n; ++idx) {
+      const double delta = alpha * d[static_cast<std::size_t>(idx)];
+      x[static_cast<std::size_t>(idx)] += delta;
+      update_sq += delta * delta;
+    }
+    if (project_vector) {
+      project_vector(x);
+    }
+
+    apply_matrix(matrix, x, ax);
+    for (int idx = 0; idx < matrix.n; ++idx) {
+      r[static_cast<std::size_t>(idx)] = rhs[static_cast<std::size_t>(idx)] - ax[static_cast<std::size_t>(idx)];
+    }
+    if (project_vector) {
+      project_vector(r);
+    }
+
+    double x_norm_sq = dot_product(x, x);
+    report.iterations = iter + 1;
+    report.iterate_residual = std::sqrt(update_sq / std::max(x_norm_sq, 1.0e-30));
+    report.absolute_residual = l2_norm(r);
+    report.relative_residual = report.absolute_residual / std::max(rhs_norm, 1.0e-30);
+
+    if (monitor) {
+      CGMonitorData data;
+      data.iteration = iter + 1;
+      data.alpha = alpha;
+      data.absolute_residual = report.absolute_residual;
+      data.relative_residual = report.relative_residual;
+      data.iterate_residual = report.iterate_residual;
+      data.preconditioned_residual = l2_norm(z);
+      data.x = &x;
+      data.r = &r;
+      data.z = &z;
+      monitor(data);
+    }
+
+    directions.push_back(d);
+    adirections.push_back(ad);
+    if (static_cast<int>(directions.size()) > max_keep) {
+      directions.erase(directions.begin());
+      adirections.erase(adirections.begin());
+    }
+
+    if (report.relative_residual < tolerance || report.absolute_residual < tolerance) {
+      break;
+    }
   }
 
   return report;

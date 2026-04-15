@@ -62,6 +62,17 @@ double field_max_abs_difference(const ding::Field2D &a, const ding::Field2D &b) 
   return diff;
 }
 
+double interior_max_abs_difference(const ding::Field2D &a, const ding::Field2D &b) {
+  require(a.nx == b.nx && a.ny == b.ny, "field dimensions must match");
+  double diff = 0.0;
+  for (int i = 0; i < a.nx; ++i) {
+    for (int j = 0; j < a.ny; ++j) {
+      diff = std::max(diff, std::abs(a(i, j) - b(i, j)));
+    }
+  }
+  return diff;
+}
+
 void test_midpoint_material_average() {
   ding::Solver solver(make_config());
   solver.initialize();
@@ -217,6 +228,8 @@ void test_ch_sparse_krylov_solver_recovers_reference_state() {
   ding::Field2D rhs(cfg.nx, cfg.ny, cfg.ghost, 0.0);
 
   const double alpha0 = 3.0 / (2.0 * cfg.dt);
+  const double stabilization_a1 = ding::stabilization_a1_from_cn(cfg.cn);
+  const double stabilization_a2 = ding::stabilization_a2_from_cn(cfg.cn);
   for (int i = 0; i < cfg.nx; ++i) {
     for (int j = 0; j < cfg.ny; ++j) {
       const double x = (static_cast<double>(i) + 0.5) * solver.dx_;
@@ -236,7 +249,7 @@ void test_ch_sparse_krylov_solver_recovers_reference_state() {
     for (int j = 0; j < cfg.ny; ++j) {
       biharm(i, j) = solver.laplacian_center(lap, i, j);
       rhs(i, j) = alpha0 * c_exact(i, j) -
-                  (cfg.stabilization_a1 * lap(i, j) - cfg.stabilization_a2 * biharm(i, j)) / cfg.pe;
+                  (stabilization_a1 * lap(i, j) - stabilization_a2 * biharm(i, j)) / cfg.pe;
     }
   }
   solver.apply_scalar_bc(biharm);
@@ -367,6 +380,51 @@ void test_single_phase_mode_skips_ch_and_preserves_phase_field() {
           "single-phase mode should keep density diagnostics constant");
 }
 
+void test_freeze_ch_preserves_phase_but_keeps_phase_derived_materials() {
+  ding::Config cfg = make_config();
+  cfg.freeze_ch = true;
+  cfg.density_ratio = 3.0;
+  cfg.viscosity_ratio = 2.0;
+  cfg.surface_tension_multiplier = 0.0;
+
+  ding::Solver solver(cfg);
+  solver.initialize();
+
+  for (int i = 0; i < cfg.nx; ++i) {
+    for (int j = 0; j < cfg.ny; ++j) {
+      const double x = (static_cast<double>(i) + 0.5) * solver.dx_;
+      solver.c_(i, j) = 0.2 + 0.6 * x;
+    }
+  }
+  solver.apply_scalar_bc(solver.c_);
+  solver.c_previous_step_ = solver.c_;
+  solver.c_two_steps_back_ = solver.c_;
+  solver.update_materials();
+  solver.rho_previous_step_ = solver.rho_;
+  solver.eta_previous_step_ = solver.eta_;
+  solver.update_midpoint_materials();
+  solver.refresh_chemical_potential_for_current_phase();
+
+  const ding::Field2D c_before = solver.c_;
+  const ding::Field2D rho_before = solver.rho_;
+  const ding::Field2D eta_before = solver.eta_;
+  const ding::Field2D mu_before = solver.mu_;
+
+  const bool ok = solver.advance_one_timestep(0);
+  require(ok, "freeze-CH step must succeed");
+  require(field_max_abs_difference(c_before, solver.c_) < 1.0e-14,
+          "freeze_ch should leave the phase field unchanged");
+  require(interior_max_abs_difference(rho_before, solver.rho_) < 1.0e-14,
+          "freeze_ch should preserve phase-derived density");
+  require(interior_max_abs_difference(eta_before, solver.eta_) < 1.0e-14,
+          "freeze_ch should preserve phase-derived viscosity");
+  require(interior_max_abs_difference(mu_before, solver.mu_) < 1.0e-12,
+          "freeze_ch should retain the chemical potential induced by the frozen phase");
+  require(solver.last_ch_solver_name_ == "NotUsed", "freeze_ch should report CH as unused");
+  require(solver.last_ch_iterations_ == 0, "freeze_ch should not perform CH iterations");
+  require(solver.last_coupling_iterations_ == 0, "freeze_ch should not report CH outer iterations");
+}
+
 void test_advection_only_preserves_uniform_phase_field() {
   ding::Config cfg = make_config();
   cfg.mode = "advection_only";
@@ -465,6 +523,8 @@ int main() {
     std::cout << "PASS test_single_phase_mode_uses_constant_material_fields\n";
     test_single_phase_mode_skips_ch_and_preserves_phase_field();
     std::cout << "PASS test_single_phase_mode_skips_ch_and_preserves_phase_field\n";
+    test_freeze_ch_preserves_phase_but_keeps_phase_derived_materials();
+    std::cout << "PASS test_freeze_ch_preserves_phase_but_keeps_phase_derived_materials\n";
     test_advection_only_preserves_uniform_phase_field();
     std::cout << "PASS test_advection_only_preserves_uniform_phase_field\n";
     test_restart_snapshot_reproduces_reference_run();

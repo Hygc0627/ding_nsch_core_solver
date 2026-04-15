@@ -1,0 +1,17 @@
+HYDEA_OPTIONS = {
+    "example_dir": "/home/weiyy/phaseField/dinghang/HyDEA/PetIBM/examples/navierstokesHyDEA/192cavity",
+    "schedule": "deflated_pcg",
+    "ksp_type": "cg",
+    "pc_type": "icc",
+    "pc_factor_shift_type": "positive_definite",
+    "pc_factor_shift_amount": 1.0e-12,
+    "norm_type": "unpreconditioned",
+    "rtol": 0.0,
+    "atol": 1.0e-6,
+    "max_it": 800,
+    "num_deflation_vectors": 3,
+    "project_mean_zero": True,
+    "cuda": False,
+    "monitor": True,
+    "monitor_stdout": False,
+}

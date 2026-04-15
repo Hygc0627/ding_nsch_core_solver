@@ -48,6 +48,8 @@ struct Config {
   std::string hydea_solver_script = "python/hydea_pressure_solver.py";
   std::string hydea_solver_config = "python/hydea_pressure_options.py";
   std::string hydea_model_path = "";
+  std::string dcdm_direction_mode = "icc_preconditioned";
+  std::string dcdm_direction_script = "python/hydea_direction_server.py";
   std::string analysis_mode = "off";
   std::string analysis_case_group = "";
   std::string analysis_initial_guess = "zero";
@@ -67,6 +69,9 @@ struct Config {
   int ch_inner_iterations = 30;
   int momentum_iterations = 50;
   int poisson_iterations = 400;
+  int dcdm_history_size = 2;
+  int dcdm_max_stored_directions = 8;
+  int dcdm_restart_interval = 0;
   double dt = 1.0e-4;
   double lx = 1.0;
   double ly = 1.0;
@@ -76,8 +81,6 @@ struct Config {
   double cn = 0.02;
   double density_ratio = 0.1;
   double viscosity_ratio = 0.1;
-  double stabilization_a1 = stabilization_a1_from_cn(cn);
-  double stabilization_a2 = stabilization_a2_from_cn(cn);
   double surface_tension_multiplier = 1.0;
   int surface_tension_smoothing_passes = 0;
   double surface_tension_smoothing_weight = 0.0;
@@ -128,6 +131,8 @@ struct Config {
   bool invert_phase = false;
   bool use_phase_clamp_debug_only = false;
   bool analysis_enabled = false;
+  bool hydea_scale_split_system = true;
+  bool freeze_ch = false;
 };
 
 Config load_config(const std::string &path);

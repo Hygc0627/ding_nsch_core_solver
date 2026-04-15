@@ -23,11 +23,7 @@ double signed_distance_box(double x, double y, double cx, double cy, double hx, 
 } // namespace
 
 Solver::Solver(Config cfg)
-    : cfg_([&cfg]() {
-        cfg.stabilization_a1 = stabilization_a1_from_cn(cfg.cn);
-        cfg.stabilization_a2 = stabilization_a2_from_cn(cfg.cn);
-        return std::move(cfg);
-      }()),
+    : cfg_(std::move(cfg)),
       grid_(cfg_),
       dx_(grid_.dx),
       dy_(grid_.dy),
@@ -64,6 +60,12 @@ bool Solver::is_advection_only_mode() const { return cfg_.mode == "advection_onl
 
 bool Solver::is_single_phase_mode() const { return cfg_.mode == "single_phase"; }
 
+bool Solver::is_phase_transport_frozen() const { return is_single_phase_mode() || cfg_.freeze_ch; }
+
+bool Solver::should_solve_cahn_hilliard() const { return !is_advection_only_mode() && !is_phase_transport_frozen(); }
+
+bool Solver::should_compute_chemical_potential() const { return !is_advection_only_mode() && !is_single_phase_mode(); }
+
 void Solver::initialize() {
   validate_boundary_configuration();
   if (cfg_.surface_tension_smoothing_passes < 0) {
@@ -81,7 +83,7 @@ void Solver::initialize() {
   last_ch_solver_name_ = "NotSolved";
   last_momentum_solver_name_ = "NotSolved";
   last_pressure_solver_name_ = "NotSolved";
-  if (is_single_phase_mode()) {
+  if (!should_solve_cahn_hilliard()) {
     last_ch_solver_name_ = "NotUsed";
   }
   if (cfg_.restart || !cfg_.restart_file.empty()) {
@@ -101,16 +103,8 @@ void Solver::initialize() {
   eta_previous_step_ = eta_;
   rho_mid_ = rho_;
   eta_mid_ = eta_;
-  if (is_single_phase_mode()) {
-    mu_.fill(0.0);
-    apply_scalar_bc(mu_);
-  } else {
-    update_chemical_potential(c_, mu_);
-  }
-  surface_fx_cell_.fill(0.0);
-  surface_fy_cell_.fill(0.0);
-  surface_fx_u_.fill(0.0);
-  surface_fy_v_.fill(0.0);
+  refresh_chemical_potential_for_current_phase();
+  clear_surface_tension_force();
   initial_mass_ = compute_mass(c_);
   pressure_.fill(0.0);
   apply_pressure_bc(pressure_);
@@ -266,31 +260,8 @@ bool Solver::advance_one_timestep(int step) {
   }
 
   current_coupling_iteration_ = 0;
-  int outer_iterations = 1;
-
-  if (is_single_phase_mode()) {
-    update_materials();
-    update_midpoint_materials();
-    mu_.fill(0.0);
-    apply_scalar_bc(mu_);
-    surface_fx_cell_.fill(0.0);
-    surface_fy_cell_.fill(0.0);
-    surface_fx_u_.fill(0.0);
-    surface_fy_v_.fill(0.0);
-    last_ch_iterations_ = 0;
-    last_ch_solver_name_ = "NotUsed";
-    last_ch_equation_residual_ = 0.0;
-    outer_iterations = 0;
-  } else {
-    // Ding 2007 §3:
-    // (1) solve CH with u^n
-    // (2) compute surface tension with 0.5*(C^n + C^{n+1})
-    // (3) solve NS/projection once to obtain u^{n+1}
-    ch_residual = solve_cahn_hilliard_semi_implicit(u_, v_, step);
-    update_materials();
-    update_midpoint_materials();
-    update_surface_tension_force(c_previous_step_, c_);
-  }
+  const PhaseStepReport phase_report = advance_phase_state(step);
+  ch_residual = phase_report.ch_residual;
 
   Field2D u_adv(u_.nx, u_.ny, u_.ghost, 0.0);
   Field2D v_adv(v_.nx, v_.ny, v_.ghost, 0.0);
@@ -300,13 +271,8 @@ bool Solver::advance_one_timestep(int step) {
   pressure_residual = solve_pressure_correction();
   apply_pressure_velocity_correction();
 
-  if (is_single_phase_mode()) {
-    mu_.fill(0.0);
-    apply_scalar_bc(mu_);
-  } else {
-    update_chemical_potential(c_, mu_);
-  }
-  last_coupling_iterations_ = outer_iterations;
+  refresh_chemical_potential_for_current_phase();
+  last_coupling_iterations_ = phase_report.outer_iterations;
   last_diag_ = compute_diagnostics();
   last_diag_.ch_inner_residual = ch_residual;
   last_diag_.ch_equation_residual = last_ch_equation_residual_;
@@ -367,6 +333,7 @@ bool Solver::run() {
         close_history_csv_stream();
         close_case_log();
         stop_petsc_pressure_worker();
+        stop_dcdm_direction_worker();
         return false;
       }
 
@@ -392,6 +359,7 @@ bool Solver::run() {
         close_history_csv_stream();
         close_case_log();
         stop_petsc_pressure_worker();
+        stop_dcdm_direction_worker();
         return false;
       }
     }
@@ -423,6 +391,7 @@ bool Solver::run() {
     close_history_csv_stream();
     close_case_log();
     stop_petsc_pressure_worker();
+    stop_dcdm_direction_worker();
     std::cout << summary.str() << "\n";
     return ok;
   } catch (const std::exception &ex) {
@@ -430,6 +399,7 @@ bool Solver::run() {
     close_history_csv_stream();
     close_case_log();
     stop_petsc_pressure_worker();
+    stop_dcdm_direction_worker();
     throw;
   }
 }

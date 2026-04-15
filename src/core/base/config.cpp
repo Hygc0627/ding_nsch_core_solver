@@ -70,6 +70,10 @@ Config load_config(const std::string &path) {
     kv[trim(line.substr(0, eq))] = trim(line.substr(eq + 1));
   }
 
+  if (kv.count("stabilization_a1") != 0 || kv.count("stabilization_a2") != 0) {
+    throw std::runtime_error("stabilization_a1/stabilization_a2 are derived from cn and must not be set in case files");
+  }
+
   Config cfg;
   auto set_int = [&](const char *key, int &value) {
     if (kv.count(key) != 0) {
@@ -115,6 +119,8 @@ Config load_config(const std::string &path) {
   set_string("hydea_solver_script", cfg.hydea_solver_script);
   set_string("hydea_solver_config", cfg.hydea_solver_config);
   set_string("hydea_model_path", cfg.hydea_model_path);
+  set_string("dcdm_direction_mode", cfg.dcdm_direction_mode);
+  set_string("dcdm_direction_script", cfg.dcdm_direction_script);
   set_string("analysis_mode", cfg.analysis_mode);
   set_string("analysis_case_group", cfg.analysis_case_group);
   set_string("analysis_initial_guess", cfg.analysis_initial_guess);
@@ -134,6 +140,9 @@ Config load_config(const std::string &path) {
   set_int("ch_inner_iterations", cfg.ch_inner_iterations);
   set_int("momentum_iterations", cfg.momentum_iterations);
   set_int("poisson_iterations", cfg.poisson_iterations);
+  set_int("dcdm_history_size", cfg.dcdm_history_size);
+  set_int("dcdm_max_stored_directions", cfg.dcdm_max_stored_directions);
+  set_int("dcdm_restart_interval", cfg.dcdm_restart_interval);
   set_int("surface_tension_smoothing_passes", cfg.surface_tension_smoothing_passes);
   set_double("dt", cfg.dt);
   set_double("lx", cfg.lx);
@@ -171,8 +180,6 @@ Config load_config(const std::string &path) {
   set_double("check_divergence_max", cfg.check_divergence_max);
   set_double("check_mu_max", cfg.check_mu_max);
   set_double("check_velocity_max", cfg.check_velocity_max);
-  cfg.stabilization_a1 = stabilization_a1_from_cn(cfg.cn);
-  cfg.stabilization_a2 = stabilization_a2_from_cn(cfg.cn);
   set_bc("pressure_bc_left_type", "pressure_bc_left_value", cfg.pressure_bc_left);
   set_bc("pressure_bc_right_type", "pressure_bc_right_value", cfg.pressure_bc_right);
   set_bc("pressure_bc_bottom_type", "pressure_bc_bottom_value", cfg.pressure_bc_bottom);
@@ -195,6 +202,8 @@ Config load_config(const std::string &path) {
   set_bool("invert_phase", cfg.invert_phase);
   set_bool("use_phase_clamp_debug_only", cfg.use_phase_clamp_debug_only);
   set_bool("analysis_enabled", cfg.analysis_enabled);
+  set_bool("hydea_scale_split_system", cfg.hydea_scale_split_system);
+  set_bool("freeze_ch", cfg.freeze_ch);
   return cfg;
 }
 

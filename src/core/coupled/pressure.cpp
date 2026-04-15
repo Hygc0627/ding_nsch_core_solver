@@ -2,6 +2,7 @@
 #include "core/linear_algebra/ch_sparse_krylov.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -78,6 +79,27 @@ void write_pressure_vector_file(const std::filesystem::path &path, const std::ve
   for (double value : values) {
     out << value << "\n";
   }
+}
+
+std::vector<double> read_pressure_vector_file(const std::filesystem::path &path) {
+  std::ifstream in(path);
+  if (!in) {
+    throw std::runtime_error("cannot open pressure vector file: " + path.string());
+  }
+
+  int n = 0;
+  in >> n;
+  if (n < 0) {
+    throw std::runtime_error("invalid pressure vector length in file: " + path.string());
+  }
+
+  std::vector<double> values(static_cast<std::size_t>(n), 0.0);
+  for (int idx = 0; idx < n; ++idx) {
+    if (!(in >> values[static_cast<std::size_t>(idx)])) {
+      throw std::runtime_error("failed reading pressure vector file: " + path.string());
+    }
+  }
+  return values;
 }
 
 void scale_pressure_linear_system(std::vector<std::map<int, double>> &row_maps, std::vector<double> &rhs,
@@ -333,6 +355,109 @@ double Solver::solve_pressure_correction_liu_split_icpcg() {
   const KrylovPreconditioner preconditioner = build_icc_preconditioner_strict(matrix);
   const LinearSolveReport report = solve_pressure_system_strict(
       matrix, system.rhs, cfg_.poisson_iterations, cfg_.pressure_tolerance, preconditioner, x, pressure_nullspace_projection());
+  last_pressure_iterations_ = report.iterations;
+  scatter_pressure_solution(x);
+  if (!pressure_has_dirichlet_boundary()) {
+    subtract_mean(pressure_correction_);
+  }
+  apply_pressure_bc(pressure_correction_);
+  return report.relative_residual;
+}
+
+double Solver::solve_pressure_correction_liu_split_dcdm_icpcg() {
+  namespace fs = std::filesystem;
+
+  pressure_correction_.fill(0.0);
+  apply_pressure_bc(pressure_correction_);
+  last_pressure_iterations_ = 0;
+
+  Field2D pressure_extrapolated(cfg_.nx, cfg_.ny, cfg_.ghost, 0.0);
+  build_liu_split_pressure_extrapolation(pressure_extrapolated);
+  const double rho_ref = liu_split_reference_density();
+  const PressureLinearSystem system = assemble_pressure_linear_system(true, rho_ref, &pressure_extrapolated);
+  const SparseMatrixCSR matrix = finalize_pressure_matrix(system.row_maps);
+  std::vector<double> x(static_cast<std::size_t>(matrix.n), 0.0);
+  const KrylovPreconditioner preconditioner = build_icc_preconditioner_strict(matrix);
+  const ch_sparse_krylov::VectorProjection project_vector = pressure_nullspace_projection();
+
+  std::string direction_mode = cfg_.dcdm_direction_mode;
+  std::transform(direction_mode.begin(), direction_mode.end(), direction_mode.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+
+  const bool use_identity_direction = direction_mode == "identity";
+  const bool use_icc_direction = direction_mode == "icc" || direction_mode == "icc_preconditioned" ||
+                                 direction_mode == "pcg_preconditioned";
+  const bool use_neural_direction =
+      direction_mode == "neural" || direction_mode == "hydea_neural" || direction_mode == "ml";
+  if (!use_identity_direction && !use_icc_direction && !use_neural_direction) {
+    throw std::runtime_error("unsupported dcdm_direction_mode: " + cfg_.dcdm_direction_mode);
+  }
+
+  const fs::path solver_dir = pressure_solver_dir();
+  fs::create_directories(solver_dir);
+  const fs::path direction_input_path = solver_dir / "dcdm_direction_input.txt";
+  const fs::path direction_output_path = solver_dir / "dcdm_direction_output.txt";
+
+  bool neural_direction_enabled = use_neural_direction;
+  bool neural_direction_failed = false;
+  if (use_neural_direction) {
+    if (cfg_.hydea_model_path.empty()) {
+      throw std::runtime_error("dcdm neural direction requires hydea_model_path");
+    }
+    const fs::path options_path = cfg_.hydea_solver_config;
+    if (!fs::exists(options_path)) {
+      throw std::runtime_error("HyDEA direction options file not found: " + options_path.string());
+    }
+    start_dcdm_direction_worker(options_path.string(), cfg_.hydea_model_path, cfg_.nx, cfg_.ny);
+  }
+
+  const auto icc_direction = [&](const std::vector<double> &residual_like, std::vector<double> &candidate) {
+    ch_sparse_krylov::apply_preconditioner(matrix, preconditioner, residual_like, candidate);
+    return true;
+  };
+
+  const ch_sparse_krylov::DirectionGenerator direction_generator =
+      [&](const std::vector<double> &normalized_residual, std::vector<double> &candidate_direction,
+          const ch_sparse_krylov::DirectionGenerationContext &context) {
+        (void)context;
+        if (use_identity_direction) {
+          candidate_direction = normalized_residual;
+          return true;
+        }
+        if (use_icc_direction) {
+          return icc_direction(normalized_residual, candidate_direction);
+        }
+        if (!neural_direction_enabled) {
+          return icc_direction(normalized_residual, candidate_direction);
+        }
+
+        try {
+          write_pressure_vector_file(direction_input_path, normalized_residual);
+          request_dcdm_direction_via_worker(direction_input_path.string(), direction_output_path.string());
+          candidate_direction = read_pressure_vector_file(direction_output_path);
+          if (static_cast<int>(candidate_direction.size()) != matrix.n) {
+            throw std::runtime_error("neural direction size mismatch");
+          }
+          return true;
+        } catch (const std::exception &ex) {
+          neural_direction_enabled = false;
+          if (!neural_direction_failed) {
+            neural_direction_failed = true;
+            log_message("WARN step=" + std::to_string(current_step_index_ + 1) +
+                        " dcdm_neural_direction_fallback=icc reason=" + ex.what());
+          }
+          return icc_direction(normalized_residual, candidate_direction);
+        }
+      };
+
+  ch_sparse_krylov::DCDMOptions options;
+  options.history_size = cfg_.dcdm_history_size;
+  options.max_stored_directions = cfg_.dcdm_max_stored_directions;
+  options.restart_interval = cfg_.dcdm_restart_interval;
+  const LinearSolveReport report = ch_sparse_krylov::solve_dcdm_conjugate_directions(
+      matrix, system.rhs, cfg_.poisson_iterations, cfg_.pressure_tolerance, x, direction_generator, options,
+      project_vector);
   last_pressure_iterations_ = report.iterations;
   scatter_pressure_solution(x);
   if (!pressure_has_dirichlet_boundary()) {
@@ -601,6 +726,123 @@ void Solver::stop_petsc_pressure_worker() {
   petsc_pressure_worker_use_constant_nullspace_ = false;
 }
 
+void Solver::start_dcdm_direction_worker(const std::string &options_path, const std::string &model_path, int grid_nx,
+                                         int grid_ny) {
+  namespace fs = std::filesystem;
+
+  if (dcdm_direction_worker_in_ && dcdm_direction_worker_out_ && dcdm_direction_worker_options_path_ == options_path &&
+      dcdm_direction_worker_model_path_ == model_path && dcdm_direction_worker_grid_nx_ == grid_nx &&
+      dcdm_direction_worker_grid_ny_ == grid_ny) {
+    return;
+  }
+  stop_dcdm_direction_worker();
+
+  const fs::path script_path = cfg_.dcdm_direction_script;
+  if (!fs::exists(script_path)) {
+    throw std::runtime_error("DCDM direction helper script not found: " + script_path.string());
+  }
+  if (!fs::exists(fs::path(options_path))) {
+    throw std::runtime_error("DCDM direction options file not found: " + options_path);
+  }
+
+  int stdin_pipe[2] = {-1, -1};
+  int stdout_pipe[2] = {-1, -1};
+  if (pipe(stdin_pipe) != 0 || pipe(stdout_pipe) != 0) {
+    throw std::runtime_error("failed to create pipes for DCDM direction worker");
+  }
+
+  const pid_t pid = fork();
+  if (pid < 0) {
+    close(stdin_pipe[0]);
+    close(stdin_pipe[1]);
+    close(stdout_pipe[0]);
+    close(stdout_pipe[1]);
+    throw std::runtime_error("failed to fork DCDM direction worker");
+  }
+
+  if (pid == 0) {
+    const std::string nx_text = std::to_string(grid_nx);
+    const std::string ny_text = std::to_string(grid_ny);
+    dup2(stdin_pipe[0], STDIN_FILENO);
+    dup2(stdout_pipe[1], STDOUT_FILENO);
+    close(stdin_pipe[0]);
+    close(stdin_pipe[1]);
+    close(stdout_pipe[0]);
+    close(stdout_pipe[1]);
+    execlp(cfg_.petsc_python_executable.c_str(), cfg_.petsc_python_executable.c_str(), script_path.string().c_str(),
+           "--server", "--config", options_path.c_str(), "--model-path", model_path.c_str(), "--grid-nx",
+           nx_text.c_str(), "--grid-ny", ny_text.c_str(), static_cast<char *>(nullptr));
+    _exit(127);
+  }
+
+  close(stdin_pipe[0]);
+  close(stdout_pipe[1]);
+  dcdm_direction_worker_pid_ = pid;
+  dcdm_direction_worker_in_ = fdopen(stdin_pipe[1], "w");
+  dcdm_direction_worker_out_ = fdopen(stdout_pipe[0], "r");
+  if (!dcdm_direction_worker_in_ || !dcdm_direction_worker_out_) {
+    stop_dcdm_direction_worker();
+    throw std::runtime_error("failed to open DCDM direction worker streams");
+  }
+  dcdm_direction_worker_options_path_ = options_path;
+  dcdm_direction_worker_model_path_ = model_path;
+  dcdm_direction_worker_grid_nx_ = grid_nx;
+  dcdm_direction_worker_grid_ny_ = grid_ny;
+}
+
+void Solver::stop_dcdm_direction_worker() {
+  if (dcdm_direction_worker_in_ && dcdm_direction_worker_out_) {
+    std::fputs("EXIT\n", dcdm_direction_worker_in_);
+    std::fflush(dcdm_direction_worker_in_);
+    char buffer[4096];
+    char *response = std::fgets(buffer, sizeof(buffer), dcdm_direction_worker_out_);
+    (void)response;
+  }
+  if (dcdm_direction_worker_in_) {
+    std::fclose(dcdm_direction_worker_in_);
+    dcdm_direction_worker_in_ = nullptr;
+  }
+  if (dcdm_direction_worker_out_) {
+    std::fclose(dcdm_direction_worker_out_);
+    dcdm_direction_worker_out_ = nullptr;
+  }
+  if (dcdm_direction_worker_pid_ > 0) {
+    int status = 0;
+    waitpid(dcdm_direction_worker_pid_, &status, 0);
+    dcdm_direction_worker_pid_ = -1;
+  }
+  dcdm_direction_worker_options_path_.clear();
+  dcdm_direction_worker_model_path_.clear();
+  dcdm_direction_worker_grid_nx_ = 0;
+  dcdm_direction_worker_grid_ny_ = 0;
+}
+
+void Solver::request_dcdm_direction_via_worker(const std::string &input_path, const std::string &output_path) {
+  if (!dcdm_direction_worker_in_ || !dcdm_direction_worker_out_) {
+    throw std::runtime_error("DCDM direction worker is not active");
+  }
+
+  std::fputs("DIRECTION\n", dcdm_direction_worker_in_);
+  std::fputs((input_path + "\n").c_str(), dcdm_direction_worker_in_);
+  std::fputs((output_path + "\n").c_str(), dcdm_direction_worker_in_);
+  std::fflush(dcdm_direction_worker_in_);
+
+  char buffer[4096];
+  if (!std::fgets(buffer, sizeof(buffer), dcdm_direction_worker_out_)) {
+    stop_dcdm_direction_worker();
+    throw std::runtime_error("DCDM direction worker terminated unexpectedly");
+  }
+  std::string response(buffer);
+  if (response.rfind("OK", 0) == 0) {
+    return;
+  }
+  stop_dcdm_direction_worker();
+  if (response.rfind("ERROR ", 0) == 0) {
+    throw std::runtime_error("DCDM direction worker failed: " + response.substr(6));
+  }
+  throw std::runtime_error("DCDM direction worker returned malformed response");
+}
+
 void Solver::solve_pressure_correction_petsc_via_worker(const std::string &rhs_path, const std::string &solution_path,
                                                         const std::string &report_path,
                                                         const std::string &monitor_log_path,
@@ -665,7 +907,7 @@ double Solver::solve_pressure_correction_hydea() {
   }
   build_pressure_linear_system(row_maps, rhs_values, max_diag, use_split, rho_ref,
                                use_split ? &pressure_extrapolated : nullptr);
-  if (use_split) {
+  if (use_split && cfg_.hydea_scale_split_system) {
     // Match the local HyDEA training operator, which uses the normalized
     // five-point Laplacian with O(1) coefficients (diag in [2, 4], offdiag -1).
     if (std::abs(dx_ - dy_) > 1.0e-12) {
@@ -807,6 +1049,10 @@ double Solver::solve_pressure_correction() {
              cfg_.pressure_scheme == "paper_split_icpcg") {
     solver_name = "SplitICCPCG";
     residual = solve_pressure_correction_liu_split_icpcg();
+  } else if (cfg_.pressure_scheme == "liu_split_dcdm_icpcg" || cfg_.pressure_scheme == "split_dcdm_icpcg" ||
+             cfg_.pressure_scheme == "paper_split_dcdm_icpcg") {
+    solver_name = "SplitDCDMICC";
+    residual = solve_pressure_correction_liu_split_dcdm_icpcg();
   } else if (cfg_.pressure_scheme == "liu_split_ildlt_pcg" || cfg_.pressure_scheme == "split_ildlt_pcg" ||
              cfg_.pressure_scheme == "paper_split_ildlt_pcg") {
     solver_name = "SplitILDLTPCG";
@@ -832,7 +1078,9 @@ double Solver::solve_pressure_correction() {
   if (analysis_mode_enabled("online") &&
       (cfg_.pressure_scheme == "icpcg" || cfg_.pressure_scheme == "ildlt_pcg" ||
        cfg_.pressure_scheme == "liu_split_icpcg" || cfg_.pressure_scheme == "split_icpcg" ||
-       cfg_.pressure_scheme == "paper_split_icpcg" || cfg_.pressure_scheme == "liu_split_ildlt_pcg" ||
+       cfg_.pressure_scheme == "paper_split_icpcg" || cfg_.pressure_scheme == "liu_split_dcdm_icpcg" ||
+       cfg_.pressure_scheme == "split_dcdm_icpcg" || cfg_.pressure_scheme == "paper_split_dcdm_icpcg" ||
+       cfg_.pressure_scheme == "liu_split_ildlt_pcg" ||
        cfg_.pressure_scheme == "split_ildlt_pcg" || cfg_.pressure_scheme == "paper_split_ildlt_pcg") &&
       current_step_index_ + 1 == cfg_.analysis_trigger_step) {
     run_pressure_analysis_from_snapshot(make_pressure_analysis_snapshot("online"));
